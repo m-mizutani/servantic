@@ -97,7 +97,12 @@ func cloneMessage(m Message) Message {
 		for i, c := range m.Contents {
 			dataCopy := make(json.RawMessage, len(c.Data))
 			copy(dataCopy, c.Data)
-			clone.Contents[i] = MessageContent{Type: c.Type, Data: dataCopy}
+			var metaCopy json.RawMessage
+			if c.Meta != nil {
+				metaCopy = make(json.RawMessage, len(c.Meta))
+				copy(metaCopy, c.Meta)
+			}
+			clone.Contents[i] = MessageContent{Type: c.Type, Data: dataCopy, Meta: metaCopy}
 		}
 	}
 

@@ -789,3 +789,32 @@ func TestHistoryCloneWithCurrentVersion(t *testing.T) {
 	gt.Equal(t, original.LLType, cloned.LLType)
 	gt.Equal(t, original.Version, cloned.Version)
 }
+
+// TestClonePreservesContentMeta verifies that History.Clone performs a true deep
+// copy of every MessageContent field, including Meta (which carries Gemini's
+// ThoughtSignature and Claude content-block metadata).
+func TestClonePreservesContentMeta(t *testing.T) {
+	meta := json.RawMessage(`{"thought_signature":"YWJjZA=="}`)
+	original := &gollem.History{
+		LLType:  gollem.LLMTypeGemini,
+		Version: gollem.HistoryVersion,
+		Messages: []gollem.Message{
+			{
+				Role: gollem.RoleAssistant,
+				Contents: []gollem.MessageContent{
+					{
+						Type: gollem.MessageContentTypeThinking,
+						Data: json.RawMessage(`{"text":"reasoning"}`),
+						Meta: meta,
+					},
+				},
+			},
+		},
+	}
+
+	cloned := original.Clone()
+
+	// Data was already copied; Meta must be too.
+	gt.Equal(t, original.Messages[0].Contents[0].Data, cloned.Messages[0].Contents[0].Data)
+	gt.Equal(t, original.Messages[0].Contents[0].Meta, cloned.Messages[0].Contents[0].Meta)
+}

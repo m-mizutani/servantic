@@ -7,10 +7,15 @@ import (
 	"io"
 	"log/slog"
 	"math/rand"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gollem-dev/gollem"
+	"github.com/gollem-dev/gollem/llm/claude"
+	"github.com/gollem-dev/gollem/llm/gemini"
+	"github.com/gollem-dev/gollem/llm/openai"
 	"github.com/gollem-dev/gollem/mock"
 	"github.com/gollem-dev/gollem/trace"
 	"github.com/m-mizutani/gt"
@@ -203,6 +208,39 @@ func TestGollemWithTool(t *testing.T) {
 		gt.Equal(t, 1, len(capturedToolCalls))
 		gt.Equal(t, "random_number", capturedToolCalls[0].Name)
 	})
+}
+
+func TestPromptCachePropagation(t *testing.T) {
+	runTest := func(enabled bool) func(t *testing.T) {
+		return func(t *testing.T) {
+			var captured bool
+			mockClient := &mock.LLMClientMock{
+				NewSessionFunc: func(ctx context.Context, options ...gollem.SessionOption) (gollem.Session, error) {
+					// Reconstruct the session config the agent assembled to observe
+					// whether the prompt-cache flag was threaded through.
+					cfg := gollem.NewSessionConfig(options...)
+					captured = cfg.PromptCache()
+					return &mock.SessionMock{
+						GenerateFunc: func(ctx context.Context, input []gollem.Input, opts ...gollem.GenerateOption) (*gollem.Response, error) {
+							return &gollem.Response{Texts: []string{"done"}}, nil
+						},
+					}, nil
+				},
+			}
+
+			opts := []gollem.Option{gollem.WithLoopLimit(2)}
+			if enabled {
+				opts = append(opts, gollem.WithPromptCache(true))
+			}
+			s := gollem.New(mockClient, opts...)
+			_, err := s.Execute(t.Context(), gollem.Text("hi"))
+			gt.NoError(t, err)
+			gt.Equal(t, enabled, captured)
+		}
+	}
+
+	t.Run("enabled propagates to session", runTest(true))
+	t.Run("disabled by default", runTest(false))
 }
 
 // mockTool is a mock implementation of gollem.Tool
@@ -1522,4 +1560,202 @@ func TestStackTraceWithAgentExecute(t *testing.T) {
 		gt.S(t, toolSpan.StackTrace[0].Function).Contains("executeToolCall")
 		gt.N(t, toolSpan.StackTrace[0].Line).Greater(0)
 	})
+}
+
+// TestPromptCacheLive verifies prompt-cache behavior against the real APIs of
+// every supported provider. The shared observable across all providers is a
+// cache *read* (hit) on a repeated large prompt prefix; Claude additionally
+// reports a cache *write* on the first call. Each provider is gated on its own
+// TEST_ environment variables and skipped when unset.
+func TestPromptCacheLive(t *testing.T) {
+	// runCacheCheck sends a large prefix twice through one session and observes the
+	// prompt-cache token accounting.
+	//   - requireHit:      assert the second call reports a cache read. Use for
+	//                      providers whose caching is deterministic for a repeated
+	//                      prefix (Claude explicit control, OpenAI automatic). Not
+	//                      set for Gemini, whose implicit caching is best-effort.
+	//   - expectCreation:  assert the first (cold) call reports a cache write. Only
+	//                      Claude distinguishes and reports cache writes.
+	// The token-accounting invariants (InputToken is total input; cache counts are
+	// non-negative) are always asserted, so the observation path is verified for
+	// every provider even when no hit occurs.
+	runCacheCheck := func(t *testing.T, client gollem.LLMClient, requireHit, expectCreation bool) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		// Build a prefix comfortably above every model's minimum cacheable length
+		// (up to 4096 tokens). Placed in the user input so it reaches providers
+		// that do not send the system prompt as a message (OpenAI). A per-run
+		// nonce keeps the prefix unique so the first call is a cold cache write
+		// (not a hit on a cache left over from a previous run within the TTL).
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "session-nonce-%d-%d ", os.Getpid(), time.Now().UnixNano())
+		for i := 0; i < 1000; i++ {
+			sb.WriteString("Context paragraph for prompt caching validation. ")
+		}
+		bigPrefix := sb.String()
+
+		session, err := client.NewSession(ctx, gollem.WithSessionPromptCache(true))
+		gt.NoError(t, err).Required()
+
+		first, err := session.Generate(ctx,
+			[]gollem.Input{gollem.Text(bigPrefix), gollem.Text("Reply with the single word: one")},
+			gollem.WithMaxTokens(2048))
+		gt.NoError(t, err).Required()
+
+		second, err := session.Generate(ctx,
+			[]gollem.Input{gollem.Text("Reply with the single word: two")},
+			gollem.WithMaxTokens(2048))
+		gt.NoError(t, err).Required()
+
+		t.Logf("first : input=%d creation=%d read=%d",
+			first.InputToken, first.CacheCreationInputToken, first.CacheReadInputToken)
+		t.Logf("second: input=%d creation=%d read=%d",
+			second.InputToken, second.CacheCreationInputToken, second.CacheReadInputToken)
+
+		// Accounting invariants (always hold, cache hit or not).
+		gt.Value(t, second.InputToken >= second.CacheReadInputToken).Equal(true)
+		gt.Value(t, second.CacheReadInputToken >= 0).Equal(true)
+		gt.Value(t, first.CacheCreationInputToken >= 0).Equal(true)
+
+		if requireHit {
+			// The repeated prefix was served from the cache on the second call.
+			gt.Value(t, second.CacheReadInputToken > 0).Equal(true)
+		}
+		if expectCreation {
+			// The cold first call wrote the prefix to the cache.
+			gt.Value(t, first.CacheCreationInputToken > 0).Equal(true)
+		}
+	}
+
+	t.Run("claude", func(t *testing.T) {
+		apiKey, ok := os.LookupEnv("TEST_CLAUDE_API_KEY")
+		if !ok {
+			t.Skip("TEST_CLAUDE_API_KEY is not set")
+		}
+		client, err := claude.New(context.Background(), apiKey)
+		gt.NoError(t, err).Required()
+		// Claude has explicit cache control: both write and read are deterministic.
+		runCacheCheck(t, client, true, true)
+	})
+
+	t.Run("openai", func(t *testing.T) {
+		apiKey, ok := os.LookupEnv("TEST_OPENAI_API_KEY")
+		if !ok {
+			t.Skip("TEST_OPENAI_API_KEY is not set")
+		}
+		client, err := openai.New(context.Background(), apiKey)
+		gt.NoError(t, err).Required()
+		// OpenAI caches automatically for long repeated prefixes and reports reads
+		// only (no creation count).
+		runCacheCheck(t, client, true, false)
+	})
+
+	t.Run("gemini", func(t *testing.T) {
+		projectID, ok := os.LookupEnv("TEST_GCP_PROJECT_ID")
+		if !ok {
+			t.Skip("TEST_GCP_PROJECT_ID is not set")
+		}
+		location, ok := os.LookupEnv("TEST_GCP_LOCATION")
+		if !ok {
+			t.Skip("TEST_GCP_LOCATION is not set")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+
+		// Gemini caches implicitly (no client-side control). Implicit caching is
+		// reliable on gemini-2.5-flash for a large repeated prefix but flaky or
+		// absent on other models, so pin the model here to keep the assertion
+		// deterministic. 2.5 models need an explicit thinking budget instead of
+		// the default thinking level.
+		client, err := gemini.New(ctx, projectID, location,
+			gemini.WithModel("gemini-2.5-flash"), gemini.WithThinkingBudget(0))
+		gt.NoError(t, err).Required()
+
+		var sb strings.Builder
+		for i := 0; i < 2000; i++ {
+			sb.WriteString("Context paragraph for prompt caching validation. ")
+		}
+		input := []gollem.Input{gollem.Text(sb.String()), gollem.Text("Reply with the single word: one")}
+
+		// First request primes the implicit cache; a fresh session with identical
+		// input then hits it.
+		prime, err := client.NewSession(ctx)
+		gt.NoError(t, err).Required()
+		_, err = prime.Generate(ctx, input, gollem.WithMaxTokens(64))
+		gt.NoError(t, err).Required()
+
+		hit, err := client.NewSession(ctx)
+		gt.NoError(t, err).Required()
+		resp, err := hit.Generate(ctx, input, gollem.WithMaxTokens(64))
+		gt.NoError(t, err).Required()
+
+		t.Logf("gemini implicit cache: input=%d read=%d", resp.InputToken, resp.CacheReadInputToken)
+		gt.Value(t, resp.CacheReadInputToken > 0).Equal(true)
+		gt.Value(t, resp.InputToken >= resp.CacheReadInputToken).Equal(true)
+	})
+}
+
+// captureStrategy records the LastResponse the agent produced, for asserting the
+// streaming token accumulation.
+type captureStrategy struct {
+	inputs []gollem.Input
+	got    *gollem.Response
+}
+
+func (s *captureStrategy) Init(ctx context.Context, inputs []gollem.Input) error {
+	s.inputs = inputs
+	return nil
+}
+
+func (s *captureStrategy) Handle(ctx context.Context, state *gollem.StrategyState) ([]gollem.Input, *gollem.ExecuteResponse, error) {
+	if state.LastResponse != nil {
+		s.got = state.LastResponse
+		return nil, &gollem.ExecuteResponse{Texts: []string{"done"}}, nil
+	}
+	return s.inputs, nil, nil
+}
+
+func (s *captureStrategy) Tools(ctx context.Context) ([]gollem.Tool, error) { return nil, nil }
+
+func TestStreamingUsageNotMultiplied(t *testing.T) {
+	// A provider emits the per-call usage snapshot on every chunk (the running
+	// total, not a delta). The agent must report the single total, not the sum
+	// over chunks.
+	mockClient := &mock.LLMClientMock{
+		NewSessionFunc: func(ctx context.Context, options ...gollem.SessionOption) (gollem.Session, error) {
+			return &mock.SessionMock{
+				StreamFunc: func(ctx context.Context, input []gollem.Input, opts ...gollem.GenerateOption) (<-chan *gollem.Response, error) {
+					ch := make(chan *gollem.Response)
+					go func() {
+						defer close(ch)
+						for i := 0; i < 3; i++ {
+							ch <- &gollem.Response{
+								Texts:               []string{"chunk"},
+								InputToken:          100,
+								OutputToken:         5,
+								CacheReadInputToken: 50,
+							}
+						}
+					}()
+					return ch, nil
+				},
+			}, nil
+		},
+	}
+
+	strat := &captureStrategy{}
+	s := gollem.New(mockClient,
+		gollem.WithResponseMode(gollem.ResponseModeStreaming),
+		gollem.WithStrategy(strat),
+		gollem.WithLoopLimit(3),
+	)
+	_, err := s.Execute(t.Context(), gollem.Text("hi"))
+	gt.NoError(t, err)
+	gt.Value(t, strat.got).NotNil().Required()
+
+	// Three chunks each carrying 100/5/50 must not become 300/15/150.
+	gt.Equal(t, 100, strat.got.InputToken)
+	gt.Equal(t, 5, strat.got.OutputToken)
+	gt.Equal(t, 50, strat.got.CacheReadInputToken)
 }

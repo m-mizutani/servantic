@@ -34,6 +34,7 @@ type SessionConfig struct {
 	systemPrompt   string
 	tools          []Tool
 	responseSchema *Parameter
+	promptCache    bool
 
 	// Middleware fields (ToolMiddleware excluded - managed at Agent layer)
 	contentBlockMiddlewares  []ContentBlockMiddleware
@@ -73,6 +74,11 @@ func (c *SessionConfig) ContentStreamMiddlewares() []ContentStreamMiddleware {
 // ResponseSchema returns the response schema of the session.
 func (c *SessionConfig) ResponseSchema() *Parameter {
 	return c.responseSchema
+}
+
+// PromptCache reports whether provider prompt caching is enabled for the session.
+func (c *SessionConfig) PromptCache() bool {
+	return c.promptCache
 }
 
 // NewSessionConfig creates a new session configuration. This is required for only LLM client implementations.
@@ -162,6 +168,21 @@ func WithSessionContentStreamMiddleware(middlewares ...ContentStreamMiddleware) 
 func WithSessionResponseSchema(schema *Parameter) SessionOption {
 	return func(cfg *SessionConfig) {
 		cfg.responseSchema = schema
+	}
+}
+
+// WithSessionPromptCache enables provider prompt caching for the session.
+// Currently only the Claude provider acts on it: when enabled it injects
+// ephemeral cache_control breakpoints on the stable prefix (system prompt and
+// tools) and on the growing conversation tail, so repeated prefixes are served
+// from Claude's prompt cache. OpenAI and Gemini cache automatically regardless
+// of this flag; it does not change their requests. Default: disabled.
+//
+// Usage:
+// session, err := client.NewSession(ctx, gollem.WithSessionPromptCache(true))
+func WithSessionPromptCache(enabled bool) SessionOption {
+	return func(cfg *SessionConfig) {
+		cfg.promptCache = enabled
 	}
 }
 

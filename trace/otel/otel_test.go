@@ -193,3 +193,54 @@ func TestOTelHandlerParentChildRelation(t *testing.T) {
 		}
 	}
 }
+
+func TestOTelHandlerLLMCallCacheTokens(t *testing.T) {
+	hasAttr := func(span *tracetest.SpanStub, key string) bool {
+		for _, kv := range span.Attributes {
+			if string(kv.Key) == key {
+				return true
+			}
+		}
+		return false
+	}
+	findLLMSpan := func(spans tracetest.SpanStubs) *tracetest.SpanStub {
+		for i := range spans {
+			if spans[i].Name == "llm_call" {
+				return &spans[i]
+			}
+		}
+		return nil
+	}
+
+	t.Run("records cache attributes when caching occurred", func(t *testing.T) {
+		h, exporter := setupTestHandler()
+		ctx := h.StartAgentExecute(context.Background())
+		llmCtx := h.StartLLMCall(ctx)
+		h.EndLLMCall(llmCtx, &trace.LLMCallData{
+			Model:                    "m",
+			InputTokens:              150,
+			OutputTokens:             50,
+			CacheCreationInputTokens: 10,
+			CacheReadInputTokens:     100,
+		}, nil)
+		h.EndAgentExecute(ctx, nil)
+
+		llmSpan := findLLMSpan(exporter.GetSpans())
+		gt.Value(t, llmSpan).NotNil()
+		gt.True(t, hasAttr(llmSpan, "llm.cache_creation_input_tokens"))
+		gt.True(t, hasAttr(llmSpan, "llm.cache_read_input_tokens"))
+	})
+
+	t.Run("omits cache attributes when zero", func(t *testing.T) {
+		h, exporter := setupTestHandler()
+		ctx := h.StartAgentExecute(context.Background())
+		llmCtx := h.StartLLMCall(ctx)
+		h.EndLLMCall(llmCtx, &trace.LLMCallData{Model: "m", InputTokens: 100, OutputTokens: 50}, nil)
+		h.EndAgentExecute(ctx, nil)
+
+		llmSpan := findLLMSpan(exporter.GetSpans())
+		gt.Value(t, llmSpan).NotNil()
+		gt.False(t, hasAttr(llmSpan, "llm.cache_creation_input_tokens"))
+		gt.False(t, hasAttr(llmSpan, "llm.cache_read_input_tokens"))
+	})
+}

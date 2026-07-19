@@ -28,9 +28,13 @@ type ContentResponse struct {
 	Texts         []string        // Generated text content
 	Thoughts      []string        // Thinking/reasoning content
 	FunctionCalls []*FunctionCall // Function/tool call requests
-	InputToken    int             // Number of input tokens used
+	InputToken    int             // Number of input tokens used (total, incl. cache reads)
 	OutputToken   int             // Number of output tokens used
-	Error         error           // Error if any occurred
+	// CacheCreationInputToken is input tokens written to the prompt cache (Claude only).
+	CacheCreationInputToken int
+	// CacheReadInputToken is input tokens served from the prompt cache (cache hits).
+	CacheReadInputToken int
+	Error               error // Error if any occurred
 }
 
 // ToolMiddleware is a function that wraps a ToolHandler to add behavior.

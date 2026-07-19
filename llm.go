@@ -31,6 +31,14 @@ type Response struct {
 	InputToken    int
 	OutputToken   int
 
+	// CacheCreationInputToken is the number of input tokens written to the
+	// prompt cache on this call. Only Claude reports writes; 0 elsewhere.
+	CacheCreationInputToken int
+	// CacheReadInputToken is the number of input tokens served from the prompt
+	// cache (cache hits) on this call. Reported by all providers when caching
+	// occurs. InputToken always counts total input (including these).
+	CacheReadInputToken int
+
 	// Error is an error that occurred during the generation for streaming response.
 	Error error
 }

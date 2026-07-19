@@ -525,3 +525,74 @@ func TestOpenAITraceRequestMessagesNewTurnOnly(t *testing.T) {
 	// site as Generate, so the Generate test above is structurally
 	// equivalent for the trace-delta invariant.
 }
+
+func TestOpenAICacheTokenObservation(t *testing.T) {
+	runTest := func(details *openaiapi.PromptTokensDetails, wantCacheRead int) func(t *testing.T) {
+		return func(t *testing.T) {
+			mockClient := &apiClientMock{
+				CreateChatCompletionFunc: func(ctx context.Context, req openaiapi.ChatCompletionRequest) (openaiapi.ChatCompletionResponse, error) {
+					return openaiapi.ChatCompletionResponse{
+						Choices: []openaiapi.ChatCompletionChoice{
+							{Message: openaiapi.ChatCompletionMessage{Content: "ok", Role: openaiapi.ChatMessageRoleAssistant}},
+						},
+						Usage: openaiapi.Usage{
+							PromptTokens:        200,
+							CompletionTokens:    10,
+							PromptTokensDetails: details,
+						},
+					}, nil
+				},
+			}
+
+			cfg := gollem.NewSessionConfig()
+			session, err := openai.NewSessionWithAPIClient(mockClient, cfg, "gpt-4")
+			gt.NoError(t, err)
+
+			resp, err := session.Generate(context.Background(), []gollem.Input{gollem.Text("hi")})
+			gt.NoError(t, err)
+
+			// OpenAI's PromptTokens already includes cached tokens, so InputToken stays total.
+			gt.Equal(t, 200, resp.InputToken)
+			gt.Equal(t, wantCacheRead, resp.CacheReadInputToken)
+			// OpenAI does not report cache writes.
+			gt.Equal(t, 0, resp.CacheCreationInputToken)
+		}
+	}
+
+	t.Run("reports cached prompt tokens", runTest(&openaiapi.PromptTokensDetails{CachedTokens: 150}, 150))
+	t.Run("nil details yields zero", runTest(nil, 0))
+}
+
+// TestOpenAIStreamUsageLive verifies that streaming reports token usage. Before
+// the fix the loop broke on the finish reason and never read the trailing usage
+// chunk, so streamed responses reported zero tokens.
+func TestOpenAIStreamUsageLive(t *testing.T) {
+	apiKey, ok := os.LookupEnv("TEST_OPENAI_API_KEY")
+	if !ok {
+		t.Skip("TEST_OPENAI_API_KEY is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	client, err := openai.New(ctx, apiKey)
+	gt.NoError(t, err).Required()
+	session, err := client.NewSession(ctx)
+	gt.NoError(t, err).Required()
+
+	ch, err := session.Stream(ctx, []gollem.Input{gollem.Text("Say hello in one word")}, gollem.WithMaxTokens(64))
+	gt.NoError(t, err).Required()
+
+	var lastInput, lastOutput int
+	for resp := range ch {
+		gt.NoError(t, resp.Error)
+		if resp.InputToken > 0 {
+			lastInput = resp.InputToken
+		}
+		if resp.OutputToken > 0 {
+			lastOutput = resp.OutputToken
+		}
+	}
+	t.Logf("stream usage: input=%d output=%d", lastInput, lastOutput)
+	gt.Value(t, lastInput > 0).Equal(true)
+	gt.Value(t, lastOutput > 0).Equal(true)
+}

@@ -180,6 +180,13 @@ func (h *handler) EndLLMCall(ctx context.Context, data *trace.LLMCallData, err e
 			slog.Int("input_tokens", data.InputTokens),
 			slog.Int("output_tokens", data.OutputTokens),
 		)
+		// Emit cache token breakdown only when caching occurred, to avoid noise.
+		if data.CacheCreationInputTokens > 0 {
+			attrs = append(attrs, slog.Int("cache_creation_input_tokens", data.CacheCreationInputTokens))
+		}
+		if data.CacheReadInputTokens > 0 {
+			attrs = append(attrs, slog.Int("cache_read_input_tokens", data.CacheReadInputTokens))
+		}
 
 		if reqEnabled && data.Request != nil {
 			attrs = append(attrs, slog.Any("request", data.Request))

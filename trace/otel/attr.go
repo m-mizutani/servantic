@@ -15,6 +15,14 @@ func llmOutputTokensAttr(tokens int) attribute.KeyValue {
 	return attribute.Int("llm.output_tokens", tokens)
 }
 
+func llmCacheCreationInputTokensAttr(tokens int) attribute.KeyValue {
+	return attribute.Int("llm.cache_creation_input_tokens", tokens)
+}
+
+func llmCacheReadInputTokensAttr(tokens int) attribute.KeyValue {
+	return attribute.Int("llm.cache_read_input_tokens", tokens)
+}
+
 func toolNameAttr(name string) attribute.KeyValue {
 	return attribute.String("tool.name", name)
 }

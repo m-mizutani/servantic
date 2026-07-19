@@ -522,6 +522,7 @@ func createComplexBookSchema() *gollem.Parameter {
 				Description: "Book genre tags",
 				MinItems:    Ptr(1),
 				MaxItems:    Ptr(5),
+				Required:    true,
 			},
 			"recommended": {
 				Type:        gollem.TypeBoolean,

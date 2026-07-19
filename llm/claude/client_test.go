@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -624,4 +625,298 @@ func TestClaudeTraceRequestMessagesNewTurnOnly(t *testing.T) {
 			gt.S(t, c.Text).NotContains("previous")
 		}
 	}
+}
+
+// cachePromptTestTool is a minimal tool used to exercise prompt-cache breakpoints.
+type cachePromptTestTool struct{}
+
+func (t *cachePromptTestTool) Spec() gollem.ToolSpec {
+	return gollem.ToolSpec{
+		Name:        "echo",
+		Description: "echo",
+		Parameters: map[string]*gollem.Parameter{
+			"msg": {Type: gollem.TypeString, Description: "message"},
+		},
+	}
+}
+
+func (t *cachePromptTestTool) Run(ctx context.Context, args map[string]any) (map[string]any, error) {
+	return map[string]any{"ok": true}, nil
+}
+
+func TestCacheTokensFromUsage(t *testing.T) {
+	t.Run("restores total input from cached prefix", func(t *testing.T) {
+		total, creation, read := claude.CacheTokensFromUsage(anthropic.Usage{
+			InputTokens:              50,
+			CacheCreationInputTokens: 10,
+			CacheReadInputTokens:     100,
+		})
+		gt.Equal(t, 160, total)
+		gt.Equal(t, 10, creation)
+		gt.Equal(t, 100, read)
+	})
+
+	t.Run("no caching yields raw input and zero cache", func(t *testing.T) {
+		total, creation, read := claude.CacheTokensFromUsage(anthropic.Usage{InputTokens: 42})
+		gt.Equal(t, 42, total)
+		gt.Equal(t, 0, creation)
+		gt.Equal(t, 0, read)
+	})
+}
+
+func TestApplyPromptCacheBreakpoints(t *testing.T) {
+	const ttl5m = anthropic.CacheControlEphemeralTTLTTL5m
+
+	t.Run("marks system, tools and conversation tail", func(t *testing.T) {
+		req := anthropic.MessageNewParams{
+			System: []anthropic.TextBlockParam{{Text: "a"}, {Text: "b"}},
+			Tools: []anthropic.ToolUnionParam{
+				anthropic.ToolUnionParamOfTool(anthropic.ToolInputSchemaParam{}, "t1"),
+				anthropic.ToolUnionParamOfTool(anthropic.ToolInputSchemaParam{}, "t2"),
+			},
+			Messages: []anthropic.MessageParam{
+				anthropic.NewUserMessage(anthropic.NewTextBlock("first")),
+				anthropic.NewUserMessage(anthropic.NewTextBlock("second")),
+			},
+		}
+		claude.ApplyPromptCacheBreakpoints(&req)
+
+		// Only the last system block is marked.
+		gt.Equal(t, anthropic.CacheControlEphemeralTTL(""), req.System[0].CacheControl.TTL)
+		gt.Equal(t, ttl5m, req.System[1].CacheControl.TTL)
+		// Only the last tool is marked.
+		gt.Equal(t, anthropic.CacheControlEphemeralTTL(""), req.Tools[0].OfTool.CacheControl.TTL)
+		gt.Equal(t, ttl5m, req.Tools[1].OfTool.CacheControl.TTL)
+		// Only the last message's last block is marked.
+		tail := req.Messages[1].Content
+		gt.Equal(t, ttl5m, tail[len(tail)-1].OfText.CacheControl.TTL)
+	})
+
+	t.Run("empty sections are skipped without panic", func(t *testing.T) {
+		req := anthropic.MessageNewParams{}
+		claude.ApplyPromptCacheBreakpoints(&req) // must not panic
+		gt.Equal(t, 0, len(req.System))
+		gt.Equal(t, 0, len(req.Tools))
+		gt.Equal(t, 0, len(req.Messages))
+	})
+
+	t.Run("does not mutate shared history or tools", func(t *testing.T) {
+		origMsg := anthropic.NewUserMessage(anthropic.NewTextBlock("shared"))
+		origTool := anthropic.ToolUnionParamOfTool(anthropic.ToolInputSchemaParam{}, "shared")
+		req := anthropic.MessageNewParams{
+			Tools:    []anthropic.ToolUnionParam{origTool},
+			Messages: []anthropic.MessageParam{origMsg},
+		}
+		claude.ApplyPromptCacheBreakpoints(&req)
+
+		// The request carries the marker...
+		gt.Equal(t, ttl5m, req.Tools[0].OfTool.CacheControl.TTL)
+		gt.Equal(t, ttl5m, req.Messages[0].Content[0].OfText.CacheControl.TTL)
+		// ...but the originally shared values are untouched.
+		gt.Equal(t, anthropic.CacheControlEphemeralTTL(""), origTool.OfTool.CacheControl.TTL)
+		gt.Equal(t, anthropic.CacheControlEphemeralTTL(""), origMsg.Content[0].OfText.CacheControl.TTL)
+	})
+
+	t.Run("unknown tail variant is skipped", func(t *testing.T) {
+		req := anthropic.MessageNewParams{
+			Messages: []anthropic.MessageParam{
+				{Role: anthropic.MessageParamRoleUser, Content: []anthropic.ContentBlockParamUnion{{}}},
+			},
+		}
+		claude.ApplyPromptCacheBreakpoints(&req) // must not panic on an empty union
+	})
+}
+
+func TestClaudePromptCacheWiring(t *testing.T) {
+	runTest := func(enabled bool) func(t *testing.T) {
+		return func(t *testing.T) {
+			var sent anthropic.MessageNewParams
+			mockClient := &apiClientMock{
+				MessagesNewFunc: func(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+					sent = params
+					return &anthropic.Message{
+						Content: []anthropic.ContentBlockUnion{{Type: "text", Text: "ok"}},
+						Role:    "assistant",
+						Model:   "claude-3-opus-20240229",
+					}, nil
+				},
+			}
+
+			opts := []gollem.SessionOption{
+				gollem.WithSessionSystemPrompt("you are helpful"),
+				gollem.WithSessionTools(&cachePromptTestTool{}),
+			}
+			if enabled {
+				opts = append(opts, gollem.WithSessionPromptCache(true))
+			}
+			cfg := gollem.NewSessionConfig(opts...)
+			session, err := claude.NewSessionWithAPIClient(mockClient, cfg, "claude-3-opus-20240229")
+			gt.NoError(t, err)
+
+			_, err = session.Generate(context.Background(), []gollem.Input{gollem.Text("hello")})
+			gt.NoError(t, err)
+
+			want := anthropic.CacheControlEphemeralTTL("")
+			if enabled {
+				want = anthropic.CacheControlEphemeralTTLTTL5m
+			}
+			gt.Equal(t, want, sent.System[len(sent.System)-1].CacheControl.TTL)
+			gt.Equal(t, want, sent.Tools[len(sent.Tools)-1].OfTool.CacheControl.TTL)
+			tail := sent.Messages[len(sent.Messages)-1].Content
+			gt.Equal(t, want, tail[len(tail)-1].OfText.CacheControl.TTL)
+		}
+	}
+
+	t.Run("enabled injects cache_control", runTest(true))
+	t.Run("disabled leaves request unmarked", runTest(false))
+}
+
+func TestClaudeCacheTokenObservation(t *testing.T) {
+	mockClient := &apiClientMock{
+		MessagesNewFunc: func(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+			return &anthropic.Message{
+				Content: []anthropic.ContentBlockUnion{{Type: "text", Text: "ok"}},
+				Role:    "assistant",
+				Model:   "claude-3-opus-20240229",
+				Usage: anthropic.Usage{
+					InputTokens:              50,
+					OutputTokens:             7,
+					CacheCreationInputTokens: 10,
+					CacheReadInputTokens:     100,
+				},
+			}, nil
+		},
+	}
+
+	cfg := gollem.NewSessionConfig()
+	session, err := claude.NewSessionWithAPIClient(mockClient, cfg, "claude-3-opus-20240229")
+	gt.NoError(t, err)
+
+	resp, err := session.Generate(context.Background(), []gollem.Input{gollem.Text("hi")})
+	gt.NoError(t, err)
+
+	// InputToken keeps total-input semantics (post-breakpoint + cached prefix).
+	gt.Equal(t, 160, resp.InputToken)
+	gt.Equal(t, 7, resp.OutputToken)
+	gt.Equal(t, 10, resp.CacheCreationInputToken)
+	gt.Equal(t, 100, resp.CacheReadInputToken)
+}
+
+func TestClaudeStreamPromptCacheAndObservation(t *testing.T) {
+	var sent anthropic.MessageNewParams
+	mockClient := &apiClientMock{
+		MessagesNewFunc: func(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+			sent = params
+			return &anthropic.Message{
+				Content: []anthropic.ContentBlockUnion{{Type: "text", Text: "streamed"}},
+				Role:    "assistant",
+				Model:   "claude-3-opus-20240229",
+				Usage: anthropic.Usage{
+					InputTokens:          30,
+					OutputTokens:         5,
+					CacheReadInputTokens: 120,
+				},
+			}, nil
+		},
+	}
+
+	cfg := gollem.NewSessionConfig(
+		gollem.WithSessionSystemPrompt("sys"),
+		gollem.WithSessionPromptCache(true),
+	)
+	session, err := claude.NewSessionWithAPIClient(mockClient, cfg, "claude-3-opus-20240229")
+	gt.NoError(t, err)
+
+	rec := trace.New()
+	ctx := rec.StartAgentExecute(context.Background())
+	ctx = trace.WithHandler(ctx, rec)
+
+	ch, err := session.Stream(ctx, []gollem.Input{gollem.Text("hi")})
+	gt.NoError(t, err)
+
+	var gotCacheRead, gotInput int
+	for resp := range ch {
+		gt.NoError(t, resp.Error)
+		if resp.InputToken > 0 {
+			gotInput = resp.InputToken
+			gotCacheRead = resp.CacheReadInputToken
+		}
+	}
+	rec.EndAgentExecute(ctx, nil)
+
+	// Streaming reports total input and the cached read count.
+	gt.Equal(t, 150, gotInput) // 30 post-breakpoint + 120 cached
+	gt.Equal(t, 120, gotCacheRead)
+
+	// The stream request carried the cache_control marker on the system prefix.
+	gt.Equal(t, anthropic.CacheControlEphemeralTTLTTL5m, sent.System[len(sent.System)-1].CacheControl.TTL)
+
+	// Trace records the cache breakdown.
+	var llmSpan *trace.Span
+	for _, child := range rec.Trace().RootSpan.Children {
+		if child.Kind == trace.SpanKindLLMCall {
+			llmSpan = child
+			break
+		}
+	}
+	gt.Value(t, llmSpan).NotNil()
+	gt.Equal(t, 120, llmSpan.LLMCall.CacheReadInputTokens)
+	gt.Equal(t, 150, llmSpan.LLMCall.InputTokens)
+}
+
+// TestClaudePromptCacheLive exercises the real Claude API to confirm that
+// enabling prompt caching actually writes and then reads the cached prefix.
+// This is the one path mock tests cannot prove: that the API accepts our
+// cache_control markers and reports cache usage back.
+func TestClaudePromptCacheLive(t *testing.T) {
+	apiKey, ok := os.LookupEnv("TEST_CLAUDE_API_KEY")
+	if !ok {
+		t.Skip("TEST_CLAUDE_API_KEY is not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	client, err := claude.New(ctx, apiKey)
+	gt.NoError(t, err)
+
+	// The system prompt must exceed the model's minimum cacheable length (up to
+	// 4096 tokens for some models). Repeat a sentence well past that threshold. A
+	// per-run nonce keeps the prefix unique so the first call is a cold cache
+	// write, not a hit on a cache left over from a previous run within the TTL.
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Assistant build %d-%d. ", os.Getpid(), time.Now().UnixNano())
+	for i := 0; i < 800; i++ {
+		sb.WriteString("You are a meticulous assistant that follows instructions carefully. ")
+	}
+	systemPrompt := sb.String()
+
+	session, err := client.NewSession(ctx,
+		gollem.WithSessionSystemPrompt(systemPrompt),
+		gollem.WithSessionPromptCache(true),
+	)
+	gt.NoError(t, err)
+
+	// First call: the stable prefix is written to the cache.
+	first, err := session.Generate(ctx,
+		[]gollem.Input{gollem.Text("Reply with the single word: one")},
+		gollem.WithMaxTokens(maxTestTokens))
+	gt.NoError(t, err)
+
+	// Second call: the same system prefix should be served from the cache.
+	second, err := session.Generate(ctx,
+		[]gollem.Input{gollem.Text("Reply with the single word: two")},
+		gollem.WithMaxTokens(maxTestTokens))
+	gt.NoError(t, err)
+
+	t.Logf("first : input=%d creation=%d read=%d",
+		first.InputToken, first.CacheCreationInputToken, first.CacheReadInputToken)
+	t.Logf("second: input=%d creation=%d read=%d",
+		second.InputToken, second.CacheCreationInputToken, second.CacheReadInputToken)
+
+	// The cache was written on the first call and read on the second.
+	gt.Value(t, first.CacheCreationInputToken > 0).Equal(true)
+	gt.Value(t, second.CacheReadInputToken > 0).Equal(true)
+	// InputToken keeps total-input semantics: it includes the cached prefix.
+	gt.Value(t, second.InputToken >= second.CacheReadInputToken).Equal(true)
 }

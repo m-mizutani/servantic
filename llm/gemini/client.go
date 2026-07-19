@@ -429,10 +429,14 @@ func processResponse(resp *genai.GenerateContentResponse) (*gollem.Response, err
 		Thoughts:      make([]string, 0),
 	}
 
-	// Extract token counts from UsageMetadata if available
+	// Extract token counts from UsageMetadata if available.
+	// PromptTokenCount already includes cached-content tokens, so InputToken
+	// stays total; the cached portion is surfaced for observability. Gemini
+	// implicit caching does not report cache writes (creation stays 0).
 	if resp.UsageMetadata != nil {
 		response.InputToken = int(resp.UsageMetadata.PromptTokenCount)
 		response.OutputToken = int(resp.UsageMetadata.CandidatesTokenCount)
+		response.CacheReadInputToken = int(resp.UsageMetadata.CachedContentTokenCount)
 	}
 
 	for _, candidate := range resp.Candidates {
@@ -597,10 +601,11 @@ func (s *Session) Generate(ctx context.Context, input []gollem.Input, opts ...go
 		}
 
 		return &gollem.ContentResponse{
-			Texts:         response.Texts,
-			FunctionCalls: response.FunctionCalls,
-			InputToken:    response.InputToken,
-			OutputToken:   response.OutputToken,
+			Texts:               response.Texts,
+			FunctionCalls:       response.FunctionCalls,
+			InputToken:          response.InputToken,
+			OutputToken:         response.OutputToken,
+			CacheReadInputToken: response.CacheReadInputToken,
 		}, nil
 	}
 
@@ -618,10 +623,11 @@ func (s *Session) Generate(ctx context.Context, input []gollem.Input, opts ...go
 
 	// Convert ContentResponse back to gollem.Response
 	return &gollem.Response{
-		Texts:         contentResp.Texts,
-		FunctionCalls: contentResp.FunctionCalls,
-		InputToken:    contentResp.InputToken,
-		OutputToken:   contentResp.OutputToken,
+		Texts:               contentResp.Texts,
+		FunctionCalls:       contentResp.FunctionCalls,
+		InputToken:          contentResp.InputToken,
+		OutputToken:         contentResp.OutputToken,
+		CacheReadInputToken: contentResp.CacheReadInputToken,
 	}, nil
 }
 
@@ -712,6 +718,7 @@ func (s *Session) Stream(ctx context.Context, input []gollem.Input, opts ...goll
 			var accumulatedTexts []string
 			var accumulatedFunctionCalls []*gollem.FunctionCall
 			var totalInputTokens, totalOutputTokens int
+			var totalCacheRead int
 
 			for streamResp := range apiStreamChan {
 				if streamResp.Err != nil {
@@ -733,18 +740,28 @@ func (s *Session) Stream(ctx context.Context, input []gollem.Input, opts ...goll
 					return
 				}
 
-				// Accumulate data
+				// Accumulate data. Usage counts are per-call snapshots (Gemini
+				// reports the running total, not per-chunk deltas), so take the
+				// latest non-zero value instead of summing.
 				accumulatedTexts = append(accumulatedTexts, response.Texts...)
 				accumulatedFunctionCalls = append(accumulatedFunctionCalls, response.FunctionCalls...)
-				totalInputTokens += response.InputToken
-				totalOutputTokens += response.OutputToken
+				if response.InputToken > 0 {
+					totalInputTokens = response.InputToken
+				}
+				if response.OutputToken > 0 {
+					totalOutputTokens = response.OutputToken
+				}
+				if response.CacheReadInputToken > 0 {
+					totalCacheRead = response.CacheReadInputToken
+				}
 
-				// Send streaming response with delta
+				// Send streaming response with the running totals
 				streamChan <- &gollem.ContentResponse{
-					Texts:         response.Texts,
-					FunctionCalls: response.FunctionCalls,
-					InputToken:    totalInputTokens,
-					OutputToken:   totalOutputTokens,
+					Texts:               response.Texts,
+					FunctionCalls:       response.FunctionCalls,
+					InputToken:          totalInputTokens,
+					OutputToken:         totalOutputTokens,
+					CacheReadInputToken: totalCacheRead,
 				}
 			}
 
@@ -796,9 +813,10 @@ func (s *Session) Stream(ctx context.Context, input []gollem.Input, opts ...goll
 			// Record only contents added in this turn; previous turns are
 			// already captured in earlier trace spans.
 			streamTraceData = &trace.LLMCallData{
-				InputTokens:  totalInputTokens,
-				OutputTokens: totalOutputTokens,
-				Model:        s.model,
+				InputTokens:          totalInputTokens,
+				OutputTokens:         totalOutputTokens,
+				Model:                s.model,
+				CacheReadInputTokens: totalCacheRead,
 				Request: &trace.LLMRequest{
 					SystemPrompt: s.cfg.SystemPrompt(),
 					Messages:     contentsToTraceMessages(newTurnContents),
@@ -845,10 +863,11 @@ func (s *Session) Stream(ctx context.Context, input []gollem.Input, opts ...goll
 
 			// Convert ContentResponse to Response
 			resp := &gollem.Response{
-				Texts:         contentResp.Texts,
-				FunctionCalls: contentResp.FunctionCalls,
-				InputToken:    contentResp.InputToken,
-				OutputToken:   contentResp.OutputToken,
+				Texts:               contentResp.Texts,
+				FunctionCalls:       contentResp.FunctionCalls,
+				InputToken:          contentResp.InputToken,
+				OutputToken:         contentResp.OutputToken,
+				CacheReadInputToken: contentResp.CacheReadInputToken,
 			}
 
 			respChan <- resp
@@ -1244,9 +1263,10 @@ func contentsToTraceMessages(contents []*genai.Content) []trace.Message {
 // buildGeminiTraceData builds trace.LLMCallData from a processed gollem.Response.
 func buildGeminiTraceData(response *gollem.Response, model string, systemPrompt string, contents []*genai.Content) *trace.LLMCallData {
 	data := &trace.LLMCallData{
-		InputTokens:  response.InputToken,
-		OutputTokens: response.OutputToken,
-		Model:        model,
+		InputTokens:          response.InputToken,
+		OutputTokens:         response.OutputToken,
+		Model:                model,
+		CacheReadInputTokens: response.CacheReadInputToken,
 		Request: &trace.LLMRequest{
 			SystemPrompt: systemPrompt,
 			Messages:     contentsToTraceMessages(contents),

@@ -67,6 +67,9 @@ type gollemConfig struct {
 	contentType    ContentType
 	responseSchema *Parameter
 
+	// promptCache enables provider prompt caching for sessions the agent creates.
+	promptCache bool
+
 	// Middleware for content generation
 	contentBlockMiddlewares  []ContentBlockMiddleware
 	contentStreamMiddlewares []ContentStreamMiddleware
@@ -102,6 +105,7 @@ func (c *gollemConfig) Clone() *gollemConfig {
 
 		contentType:    c.contentType,
 		responseSchema: c.responseSchema,
+		promptCache:    c.promptCache,
 
 		contentBlockMiddlewares:  c.contentBlockMiddlewares[:],
 		contentStreamMiddlewares: c.contentStreamMiddlewares[:],
@@ -166,6 +170,16 @@ func WithSystemPrompt(systemPrompt string) Option {
 func WithTools(tools ...Tool) Option {
 	return func(s *gollemConfig) {
 		s.tools = append(s.tools, tools...)
+	}
+}
+
+// WithPromptCache enables provider prompt caching for sessions created by the
+// agent. Currently only the Claude provider acts on it (ephemeral cache_control
+// on the stable prefix and the growing conversation tail); OpenAI and Gemini
+// cache automatically and are unaffected. Default: disabled.
+func WithPromptCache(enabled bool) Option {
+	return func(s *gollemConfig) {
+		s.promptCache = enabled
 	}
 }
 
@@ -379,6 +393,11 @@ func (g *Agent) Execute(ctx context.Context, input ...Input) (_ *ExecuteResponse
 			sessionOptions = append(sessionOptions, WithSessionResponseSchema(cfg.responseSchema))
 		}
 
+		// Propagate prompt-cache enablement to the session
+		if cfg.promptCache {
+			sessionOptions = append(sessionOptions, WithSessionPromptCache(true))
+		}
+
 		if cfg.history != nil {
 			sessionOptions = append(sessionOptions, WithSessionHistory(cfg.history))
 		}
@@ -547,11 +566,25 @@ func (g *Agent) Execute(ctx context.Context, input ...Input) (_ *ExecuteResponse
 				}
 				nextInput = append(nextInput, newInput...)
 
-				// Accumulate streaming response
+				// Accumulate streaming response.
+				// Token usage is a per-call snapshot repeated across chunks (each
+				// chunk carries the running/full total, not a delta), so take the
+				// latest non-zero value rather than summing to avoid multiplying
+				// the usage by the number of chunks.
 				streamedResponse.Texts = append(streamedResponse.Texts, output.Texts...)
 				streamedResponse.FunctionCalls = append(streamedResponse.FunctionCalls, output.FunctionCalls...)
-				streamedResponse.InputToken += output.InputToken
-				streamedResponse.OutputToken += output.OutputToken
+				if output.InputToken > 0 {
+					streamedResponse.InputToken = output.InputToken
+				}
+				if output.OutputToken > 0 {
+					streamedResponse.OutputToken = output.OutputToken
+				}
+				if output.CacheCreationInputToken > 0 {
+					streamedResponse.CacheCreationInputToken = output.CacheCreationInputToken
+				}
+				if output.CacheReadInputToken > 0 {
+					streamedResponse.CacheReadInputToken = output.CacheReadInputToken
+				}
 				if output.Error != nil {
 					streamedResponse.Error = output.Error
 				}

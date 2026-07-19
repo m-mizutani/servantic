@@ -91,6 +91,13 @@ func (h *handler) EndLLMCall(ctx context.Context, data *trace.LLMCallData, err e
 			llmInputTokensAttr(data.InputTokens),
 			llmOutputTokensAttr(data.OutputTokens),
 		)
+		// Record cache token breakdown only when caching occurred.
+		if data.CacheCreationInputTokens > 0 {
+			span.SetAttributes(llmCacheCreationInputTokensAttr(data.CacheCreationInputTokens))
+		}
+		if data.CacheReadInputTokens > 0 {
+			span.SetAttributes(llmCacheReadInputTokensAttr(data.CacheReadInputTokens))
+		}
 	}
 	if err != nil {
 		span.RecordError(err)

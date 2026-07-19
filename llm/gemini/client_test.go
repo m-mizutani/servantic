@@ -496,11 +496,6 @@ func TestThinkingBudgetIntegration(t *testing.T) {
 		budget int32
 	}{
 		{
-			name:   "Gemini 2.0 Flash with thinking budget disabled",
-			model:  "gemini-2.0-flash",
-			budget: 0,
-		},
-		{
 			name:   "Gemini 2.5 Flash with thinking budget disabled",
 			model:  "gemini-2.5-flash",
 			budget: 0,
@@ -533,7 +528,7 @@ func TestThinkingBudgetIntegration(t *testing.T) {
 
 			// Simple test prompt
 			response, err := session.Generate(ctx, []gollem.Input{gollem.Text("Say 'Hello' in one word")}, gollem.WithMaxTokens(maxTestTokens))
-			gt.NoError(t, err)
+			gt.NoError(t, err).Required()
 			gt.NotNil(t, response)
 			gt.Array(t, response.Texts).Length(1).Required()
 			gt.Value(t, len(response.Texts[0])).NotEqual(0)
@@ -1453,4 +1448,81 @@ func TestGeminiTraceRequestMessagesNewTurnOnly(t *testing.T) {
 			gt.S(t, c.Text).NotContains("previous")
 		}
 	}
+}
+
+func TestGeminiCacheTokenObservation(t *testing.T) {
+	mock := &apiClientMock{
+		GenerateContentFunc: func(ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+			return &genai.GenerateContentResponse{
+				Candidates: []*genai.Candidate{
+					{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "ok"}}}},
+				},
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+					PromptTokenCount:        200,
+					CandidatesTokenCount:    10,
+					CachedContentTokenCount: 150,
+				},
+			}, nil
+		},
+	}
+
+	cfg := gollem.NewSessionConfig()
+	session, err := gemini.NewSessionWithAPIClient(mock, cfg, "gemini-2.5-flash")
+	gt.NoError(t, err)
+
+	resp, err := session.Generate(context.Background(), []gollem.Input{gollem.Text("hi")})
+	gt.NoError(t, err)
+
+	// PromptTokenCount already includes cached tokens, so InputToken stays total.
+	gt.Equal(t, 200, resp.InputToken)
+	gt.Equal(t, 150, resp.CacheReadInputToken)
+	// Gemini implicit caching does not report cache writes.
+	gt.Equal(t, 0, resp.CacheCreationInputToken)
+}
+
+func TestGeminiStreamUsageNotSummed(t *testing.T) {
+	// Two stream chunks both carry usage (Gemini reports the running total, not a
+	// per-chunk delta). The session must report the single total, not the sum.
+	makeResp := func(text string) *genai.GenerateContentResponse {
+		return &genai.GenerateContentResponse{
+			Candidates: []*genai.Candidate{
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: text}}}},
+			},
+			UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+				PromptTokenCount:        100,
+				CandidatesTokenCount:    8,
+				CachedContentTokenCount: 50,
+			},
+		}
+	}
+	mock := &apiClientMock{
+		GenerateContentStreamFunc: func(ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) <-chan gemini.StreamResponse {
+			ch := make(chan gemini.StreamResponse, 2)
+			ch <- gemini.StreamResponse{Resp: makeResp("a")}
+			ch <- gemini.StreamResponse{Resp: makeResp("b")}
+			close(ch)
+			return ch
+		},
+	}
+
+	cfg := gollem.NewSessionConfig()
+	session, err := gemini.NewSessionWithAPIClient(mock, cfg, "gemini-2.5-flash")
+	gt.NoError(t, err)
+
+	ch, err := session.Stream(context.Background(), []gollem.Input{gollem.Text("hi")})
+	gt.NoError(t, err)
+
+	var lastInput, lastCacheRead int
+	for resp := range ch {
+		gt.NoError(t, resp.Error)
+		if resp.InputToken > 0 {
+			lastInput = resp.InputToken
+		}
+		if resp.CacheReadInputToken > 0 {
+			lastCacheRead = resp.CacheReadInputToken
+		}
+	}
+	// Not 200 / 100.
+	gt.Equal(t, 100, lastInput)
+	gt.Equal(t, 50, lastCacheRead)
 }

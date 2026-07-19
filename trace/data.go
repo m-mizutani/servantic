@@ -6,6 +6,10 @@ type LLMCallData struct {
 	OutputTokens int    `json:"output_tokens"`
 	Model        string `json:"model,omitempty"`
 
+	// Prompt-cache token breakdown. Omitted when zero for backward compatibility.
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+
 	Request  *LLMRequest  `json:"request"`
 	Response *LLMResponse `json:"response"`
 }

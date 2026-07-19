@@ -366,3 +366,41 @@ func TestWithMultipleEvents(t *testing.T) {
 	gt.Equal(t, entries[2].Message, "event")
 	gt.Equal(t, entries[3].Message, "agent execution ended")
 }
+
+func TestLLMCallCacheTokenLogging(t *testing.T) {
+	t.Run("emits cache tokens when caching occurred", func(t *testing.T) {
+		slogger, th := newTestLogger()
+		h := logger.New(logger.WithLogger(slogger))
+		ctx := context.Background()
+
+		llmCtx := h.StartLLMCall(ctx)
+		h.EndLLMCall(llmCtx, &trace.LLMCallData{
+			InputTokens:              150,
+			OutputTokens:             50,
+			Model:                    "test-model",
+			CacheCreationInputTokens: 10,
+			CacheReadInputTokens:     100,
+		}, nil)
+
+		entries := th.getEntries()
+		gt.Equal(t, len(entries), 1)
+		gt.Value(t, entries[0].Attrs["cache_creation_input_tokens"]).NotNil()
+		gt.Value(t, entries[0].Attrs["cache_read_input_tokens"]).NotNil()
+	})
+
+	t.Run("omits cache tokens when zero", func(t *testing.T) {
+		slogger, th := newTestLogger()
+		h := logger.New(logger.WithLogger(slogger))
+		ctx := context.Background()
+
+		llmCtx := h.StartLLMCall(ctx)
+		h.EndLLMCall(llmCtx, &trace.LLMCallData{InputTokens: 100, OutputTokens: 50, Model: "m"}, nil)
+
+		entries := th.getEntries()
+		gt.Equal(t, len(entries), 1)
+		_, hasCreation := entries[0].Attrs["cache_creation_input_tokens"]
+		_, hasRead := entries[0].Attrs["cache_read_input_tokens"]
+		gt.False(t, hasCreation)
+		gt.False(t, hasRead)
+	})
+}

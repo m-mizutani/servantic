@@ -13,6 +13,8 @@ var (
 	CreateSystemPrompt            = createSystemPrompt
 	TokenLimitErrorOptions        = tokenLimitErrorOptions
 	ClaudeMessagesToTraceMessages = claudeMessagesToTraceMessages
+	ApplyPromptCacheBreakpoints   = applyPromptCacheBreakpoints
+	CacheTokensFromUsage          = cacheTokensFromUsage
 )
 
 type JsonSchema = jsonSchema

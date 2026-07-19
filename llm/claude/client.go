@@ -447,6 +447,11 @@ func generateClaudeStream(
 		msgParams.System = systemPrompt
 	}
 
+	// Inject prompt-cache breakpoints on the stable prefix and tail
+	if cfg.PromptCache() {
+		applyPromptCacheBreakpoints(&msgParams)
+	}
+
 	stream := client.Messages.NewStreaming(ctx, msgParams)
 	if stream == nil {
 		return nil, goerr.New("failed to create message stream")
@@ -460,6 +465,8 @@ func generateClaudeStream(
 	acc := newFunctionCallAccumulator()
 	var totalInputTokens int
 	var totalOutputTokens int
+	var totalCacheCreation int
+	var totalCacheRead int
 
 	go func() {
 		defer close(responseChan)
@@ -497,9 +504,11 @@ func generateClaudeStream(
 				}
 			case "message_start":
 				messageStart := event.AsMessageStart()
-				if messageStart.Message.Usage.InputTokens > 0 {
-					totalInputTokens = int(messageStart.Message.Usage.InputTokens)
-				}
+				// input_tokens counts only tokens after the last cache breakpoint;
+				// restore the cached prefix so InputToken means total input.
+				totalCacheCreation = int(messageStart.Message.Usage.CacheCreationInputTokens)
+				totalCacheRead = int(messageStart.Message.Usage.CacheReadInputTokens)
+				totalInputTokens = int(messageStart.Message.Usage.InputTokens) + totalCacheCreation + totalCacheRead
 				if messageStart.Message.Usage.OutputTokens > 0 {
 					totalOutputTokens = int(messageStart.Message.Usage.OutputTokens)
 				}
@@ -511,6 +520,8 @@ func generateClaudeStream(
 					response.Texts = append(response.Texts, textDelta.Text)
 					response.InputToken = totalInputTokens
 					response.OutputToken = totalOutputTokens
+					response.CacheCreationInputToken = totalCacheCreation
+					response.CacheReadInputToken = totalCacheRead
 					textContent.WriteString(textDelta.Text)
 				case "input_json_delta":
 					jsonDelta := deltaEvent.Delta.AsInputJSONDelta()
@@ -536,6 +547,8 @@ func generateClaudeStream(
 					response.FunctionCalls = append(response.FunctionCalls, funcCall)
 					response.InputToken = totalInputTokens
 					response.OutputToken = totalOutputTokens
+					response.CacheCreationInputToken = totalCacheCreation
+					response.CacheReadInputToken = totalCacheRead
 					toolCalls = append(toolCalls, anthropic.NewToolUseBlock(funcCall.ID, funcCall.Arguments, funcCall.Name))
 					acc = newFunctionCallAccumulator()
 				}
@@ -556,11 +569,14 @@ func processResponseWithContentType(ctx context.Context, resp *anthropic.Message
 		return &gollem.Response{}
 	}
 
+	totalInput, cacheCreation, cacheRead := cacheTokensFromUsage(resp.Usage)
 	response := &gollem.Response{
-		Texts:         make([]string, 0),
-		FunctionCalls: make([]*gollem.FunctionCall, 0),
-		InputToken:    int(resp.Usage.InputTokens),
-		OutputToken:   int(resp.Usage.OutputTokens),
+		Texts:                   make([]string, 0),
+		FunctionCalls:           make([]*gollem.FunctionCall, 0),
+		InputToken:              totalInput,
+		OutputToken:             int(resp.Usage.OutputTokens),
+		CacheCreationInputToken: cacheCreation,
+		CacheReadInputToken:     cacheRead,
 	}
 
 	for _, content := range resp.Content {
@@ -665,6 +681,11 @@ func (s *Session) Generate(ctx context.Context, input []gollem.Input, opts ...go
 			return nil, err
 		}
 
+		// Inject prompt-cache breakpoints on the stable prefix and tail
+		if s.cfg.PromptCache() {
+			applyPromptCacheBreakpoints(&request)
+		}
+
 		// Start LLM call trace span
 		var traceData *trace.LLMCallData
 		var llmErr error
@@ -699,10 +720,12 @@ func (s *Session) Generate(ctx context.Context, input []gollem.Input, opts ...go
 		}
 
 		return &gollem.ContentResponse{
-			Texts:         processedResp.Texts,
-			FunctionCalls: processedResp.FunctionCalls,
-			InputToken:    processedResp.InputToken,
-			OutputToken:   processedResp.OutputToken,
+			Texts:                   processedResp.Texts,
+			FunctionCalls:           processedResp.FunctionCalls,
+			InputToken:              processedResp.InputToken,
+			OutputToken:             processedResp.OutputToken,
+			CacheCreationInputToken: processedResp.CacheCreationInputToken,
+			CacheReadInputToken:     processedResp.CacheReadInputToken,
 		}, nil
 	}
 
@@ -720,10 +743,12 @@ func (s *Session) Generate(ctx context.Context, input []gollem.Input, opts ...go
 
 	// Convert ContentResponse back to gollem.Response
 	return &gollem.Response{
-		Texts:         contentResp.Texts,
-		FunctionCalls: contentResp.FunctionCalls,
-		InputToken:    contentResp.InputToken,
-		OutputToken:   contentResp.OutputToken,
+		Texts:                   contentResp.Texts,
+		FunctionCalls:           contentResp.FunctionCalls,
+		InputToken:              contentResp.InputToken,
+		OutputToken:             contentResp.OutputToken,
+		CacheCreationInputToken: contentResp.CacheCreationInputToken,
+		CacheReadInputToken:     contentResp.CacheReadInputToken,
 	}, nil
 }
 
@@ -755,6 +780,94 @@ func applyPerCallOverrides(request *anthropic.MessageNewParams, opts ...gollem.G
 		}
 	}
 	return nil
+}
+
+// applyPromptCacheBreakpoints marks the stable prefix (system prompt, tools) and
+// the growing conversation tail with ephemeral cache_control so Claude serves
+// repeated prefixes from its prompt cache. Empty sections are skipped. It never
+// mutates shared session/history state: it copies the single slice element it
+// marks. Content below a model's minimum cacheable length is a no-op on the API
+// side (no error is returned), so no token-count guard is needed here.
+func applyPromptCacheBreakpoints(request *anthropic.MessageNewParams) {
+	// TTL is set explicitly to the default 5m. A zero-value
+	// CacheControlEphemeralParam{} is dropped by the SDK's `omitzero` encoding
+	// (it has no IsZero override and reflects as zero), which would silently emit
+	// no cache_control at all; setting TTL forces the field to be present.
+	cc := anthropic.CacheControlEphemeralParam{TTL: anthropic.CacheControlEphemeralTTLTTL5m}
+
+	// System: last block. createSystemPrompt returns a fresh slice each call,
+	// so in-place assignment does not touch shared state.
+	if n := len(request.System); n > 0 {
+		request.System[n-1].CacheControl = cc
+	}
+
+	// Tools: last tool. request.Tools aliases the session's tool slice, so copy
+	// the header and the target ToolParam before marking.
+	if n := len(request.Tools); n > 0 {
+		if src := request.Tools[n-1].OfTool; src != nil {
+			tools := make([]anthropic.ToolUnionParam, n)
+			copy(tools, request.Tools)
+			toolCopy := *src
+			toolCopy.CacheControl = cc
+			tools[n-1].OfTool = &toolCopy
+			request.Tools = tools
+		}
+	}
+
+	// Conversation tail: last content block of the last message.
+	markMessageTail(request.Messages, cc)
+}
+
+// markMessageTail marks the last content block of the last message with cc,
+// copying the message's content slice and the target block so shared native
+// history is never mutated. msgs must be a freshly built slice; only its last
+// element is reassigned.
+func markMessageTail(msgs []anthropic.MessageParam, cc anthropic.CacheControlEphemeralParam) {
+	if len(msgs) == 0 {
+		return
+	}
+	last := msgs[len(msgs)-1]
+	if len(last.Content) == 0 {
+		return
+	}
+	content := make([]anthropic.ContentBlockParamUnion, len(last.Content))
+	copy(content, last.Content)
+	m := len(content) - 1
+	switch {
+	case content[m].OfText != nil:
+		b := *content[m].OfText
+		b.CacheControl = cc
+		content[m].OfText = &b
+	case content[m].OfImage != nil:
+		b := *content[m].OfImage
+		b.CacheControl = cc
+		content[m].OfImage = &b
+	case content[m].OfDocument != nil:
+		b := *content[m].OfDocument
+		b.CacheControl = cc
+		content[m].OfDocument = &b
+	case content[m].OfToolResult != nil:
+		b := *content[m].OfToolResult
+		b.CacheControl = cc
+		content[m].OfToolResult = &b
+	default:
+		return // unknown variant: skip rather than guess
+	}
+	last.Content = content
+	msgs[len(msgs)-1] = last
+}
+
+// cacheTokensFromUsage extracts prompt-cache token counts from a Claude usage
+// object. Anthropic's input_tokens reports only the tokens after the last cache
+// breakpoint, so the returned total input restores the cached prefix (creation +
+// read) to keep gollem's InputToken meaning "total input" for existing consumers
+// (e.g. the compacter). When caching did not occur, creation and read are 0 and
+// total equals the raw input_tokens.
+func cacheTokensFromUsage(u anthropic.Usage) (totalInput, creation, read int) {
+	creation = int(u.CacheCreationInputTokens)
+	read = int(u.CacheReadInputTokens)
+	totalInput = int(u.InputTokens) + creation + read
+	return
 }
 
 // effectiveContentType returns the content type considering per-call schema override.
@@ -878,6 +991,11 @@ func (s *Session) Stream(ctx context.Context, input []gollem.Input, opts ...goll
 			return nil, err
 		}
 
+		// Inject prompt-cache breakpoints on the stable prefix and tail
+		if s.cfg.PromptCache() {
+			applyPromptCacheBreakpoints(&request)
+		}
+
 		// Start LLM call trace span
 		var streamTraceData *trace.LLMCallData
 		var streamErr error
@@ -906,13 +1024,16 @@ func (s *Session) Stream(ctx context.Context, input []gollem.Input, opts ...goll
 			defer close(responseChan)
 
 			// Process response and send chunks
+			totalInput, cacheCreation, cacheRead := cacheTokensFromUsage(resp.Usage)
 			for _, content := range resp.Content {
 				if content.Type == "text" {
 					textBlock := content.AsText()
 					responseChan <- &gollem.ContentResponse{
-						Texts:       []string{textBlock.Text},
-						InputToken:  int(resp.Usage.InputTokens),
-						OutputToken: int(resp.Usage.OutputTokens),
+						Texts:                   []string{textBlock.Text},
+						InputToken:              totalInput,
+						OutputToken:             int(resp.Usage.OutputTokens),
+						CacheCreationInputToken: cacheCreation,
+						CacheReadInputToken:     cacheRead,
 					}
 				}
 			}
@@ -953,10 +1074,12 @@ func (s *Session) Stream(ctx context.Context, input []gollem.Input, opts ...goll
 				}
 			} else {
 				responseChan <- &gollem.Response{
-					Texts:         streamResp.Texts,
-					FunctionCalls: streamResp.FunctionCalls,
-					InputToken:    streamResp.InputToken,
-					OutputToken:   streamResp.OutputToken,
+					Texts:                   streamResp.Texts,
+					FunctionCalls:           streamResp.FunctionCalls,
+					InputToken:              streamResp.InputToken,
+					OutputToken:             streamResp.OutputToken,
+					CacheCreationInputToken: streamResp.CacheCreationInputToken,
+					CacheReadInputToken:     streamResp.CacheReadInputToken,
 				}
 			}
 		}
@@ -1183,10 +1306,13 @@ func claudeMessagesToTraceMessages(messages []anthropic.MessageParam) []trace.Me
 
 // buildClaudeTraceData builds trace.LLMCallData from a Claude API response.
 func buildClaudeTraceData(resp *anthropic.Message, model string, systemPrompt string, messages []anthropic.MessageParam) *trace.LLMCallData {
+	totalInput, cacheCreation, cacheRead := cacheTokensFromUsage(resp.Usage)
 	data := &trace.LLMCallData{
-		InputTokens:  int(resp.Usage.InputTokens),
-		OutputTokens: int(resp.Usage.OutputTokens),
-		Model:        string(resp.Model),
+		InputTokens:              totalInput,
+		OutputTokens:             int(resp.Usage.OutputTokens),
+		Model:                    string(resp.Model),
+		CacheCreationInputTokens: cacheCreation,
+		CacheReadInputTokens:     cacheRead,
 		Request: &trace.LLMRequest{
 			SystemPrompt: systemPrompt,
 			Messages:     claudeMessagesToTraceMessages(messages),

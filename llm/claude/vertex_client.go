@@ -224,6 +224,11 @@ func (s *VertexAnthropicSession) Generate(ctx context.Context, input []gollem.In
 		return nil, err
 	}
 
+	// Inject prompt-cache breakpoints on the stable prefix and tail
+	if s.cfg.PromptCache() {
+		applyPromptCacheBreakpoints(&msgParams)
+	}
+
 	resp, err := s.client.Messages.New(ctx, msgParams)
 	if err != nil {
 		llmErr = err
@@ -342,6 +347,7 @@ func (s *VertexAnthropicSession) Stream(ctx context.Context, input []gollem.Inpu
 		var allTexts []string
 		var allFunctionCalls []*trace.FunctionCall
 		var lastInputTokens, lastOutputTokens int
+		var lastCacheCreation, lastCacheRead int
 
 		for resp := range ch {
 			if resp.Error != nil && streamErr == nil {
@@ -361,13 +367,21 @@ func (s *VertexAnthropicSession) Stream(ctx context.Context, input []gollem.Inpu
 			if resp.OutputToken > 0 {
 				lastOutputTokens = resp.OutputToken
 			}
+			if resp.CacheCreationInputToken > 0 {
+				lastCacheCreation = resp.CacheCreationInputToken
+			}
+			if resp.CacheReadInputToken > 0 {
+				lastCacheRead = resp.CacheReadInputToken
+			}
 			wrappedCh <- resp
 		}
 
 		streamTraceData = &trace.LLMCallData{
-			InputTokens:  lastInputTokens,
-			OutputTokens: lastOutputTokens,
-			Model:        s.defaultModel,
+			InputTokens:              lastInputTokens,
+			OutputTokens:             lastOutputTokens,
+			CacheCreationInputTokens: lastCacheCreation,
+			CacheReadInputTokens:     lastCacheRead,
+			Model:                    s.defaultModel,
 			Request: &trace.LLMRequest{
 				SystemPrompt: s.cfg.SystemPrompt(),
 				// Record only messages added in this turn; previous turns are

@@ -18,6 +18,7 @@ gollem is a Go framework for building applications with Large Language Models (L
 - [Middleware System](middleware.md) - Monitor, log, and control agent behavior
 - [Strategy Pattern](strategy.md) - Customize agent execution (ReAct, Plan & Execute)
 - [Tracing](tracing.md) - Agent execution tracing and observability (in-memory, OpenTelemetry)
+- [Prompt Caching](prompt-cache.md) - Observe cache usage and enable Claude prompt caching
 
 ### Reference
 - [Debugging](debugging.md) - LLM request/response logging and troubleshooting

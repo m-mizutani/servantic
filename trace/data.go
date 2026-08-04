@@ -7,6 +7,12 @@ type LLMCallData struct {
 	Model        string `json:"model,omitempty"`
 
 	// Prompt-cache token breakdown. Omitted when zero for backward compatibility.
+	//
+	// CacheCreationInputTokens counts input tokens written to the cache on this
+	// call. Only Claude reports writes; it is always 0 for OpenAI and Gemini, so 0
+	// there does not mean the cache missed. CacheReadInputTokens (cache hits) is
+	// reported by all providers. InputTokens always counts total input, including
+	// both.
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 

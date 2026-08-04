@@ -25,6 +25,7 @@ type queryConfig struct {
 	systemPrompt string
 	history      *History
 	maxRetry     int // default: 3
+	promptCache  bool
 }
 
 // WithQuerySystemPrompt sets the system prompt for the query.
@@ -45,6 +46,15 @@ func WithQueryHistory(history *History) QueryOption {
 func WithQueryMaxRetry(n int) QueryOption {
 	return func(cfg *queryConfig) {
 		cfg.maxRetry = n
+	}
+}
+
+// WithQueryPromptCache enables provider prompt caching for the session created by
+// the query. Defaults to disabled. See WithSessionPromptCache for the per-provider
+// behavior.
+func WithQueryPromptCache(enabled bool) QueryOption {
+	return func(cfg *queryConfig) {
+		cfg.promptCache = enabled
 	}
 }
 
@@ -75,6 +85,9 @@ func Query[T any](ctx context.Context, client LLMClient, prompt string, opts ...
 	}
 	if cfg.history != nil {
 		sessionOpts = append(sessionOpts, WithSessionHistory(cfg.history))
+	}
+	if cfg.promptCache {
+		sessionOpts = append(sessionOpts, WithSessionPromptCache(true))
 	}
 
 	session, err := client.NewSession(ctx, sessionOpts...)

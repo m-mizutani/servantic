@@ -110,6 +110,54 @@ func TestQueryWithHistory(t *testing.T) {
 	gt.Value(t, cfg.History()).Equal(history)
 }
 
+func TestQueryWithPromptCache(t *testing.T) {
+	type testCase struct {
+		opts            []gollem.QueryOption
+		wantPromptCache bool
+	}
+
+	runTest := func(tc testCase) func(t *testing.T) {
+		return func(t *testing.T) {
+			var capturedOpts []gollem.SessionOption
+			sessionMock := &mock.SessionMock{
+				GenerateFunc: func(ctx context.Context, input []gollem.Input, opts ...gollem.GenerateOption) (*gollem.Response, error) {
+					return &gollem.Response{
+						Texts: []string{`{"name":"x","count":1}`},
+					}, nil
+				},
+			}
+			client := &mock.LLMClientMock{
+				NewSessionFunc: func(ctx context.Context, options ...gollem.SessionOption) (gollem.Session, error) {
+					capturedOpts = options
+					return sessionMock, nil
+				},
+			}
+
+			_, err := gollem.Query[testQueryResult](context.Background(), client, "test", tc.opts...)
+			gt.NoError(t, err)
+
+			cfg := buildSessionConfig(capturedOpts)
+			gt.Value(t, cfg.PromptCache()).Equal(tc.wantPromptCache)
+			gt.Value(t, cfg.ContentType()).Equal(gollem.ContentTypeJSON)
+			gt.Value(t, cfg.ResponseSchema()).NotEqual((*gollem.Parameter)(nil))
+		}
+	}
+
+	t.Run("enabled", runTest(testCase{
+		opts:            []gollem.QueryOption{gollem.WithQueryPromptCache(true)},
+		wantPromptCache: true,
+	}))
+
+	t.Run("explicitly disabled", runTest(testCase{
+		opts:            []gollem.QueryOption{gollem.WithQueryPromptCache(false)},
+		wantPromptCache: false,
+	}))
+
+	t.Run("unspecified defaults to disabled", runTest(testCase{
+		wantPromptCache: false,
+	}))
+}
+
 func TestQueryRetrySuccess(t *testing.T) {
 	callCount := 0
 	client := setupQueryMock(t, func(ctx context.Context, input []gollem.Input, opts ...gollem.GenerateOption) (*gollem.Response, error) {

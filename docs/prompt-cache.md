@@ -45,10 +45,13 @@ log.Printf("input=%d (cached read=%d, cache write=%d) output=%d",
     resp.CacheCreationInputToken, resp.OutputToken)
 ```
 
-The same values are recorded on trace spans (`trace/logger` emits
-`cache_creation_input_tokens` / `cache_read_input_tokens`; `trace/otel` sets
-`llm.cache_creation_input_tokens` / `llm.cache_read_input_tokens`). They are
-omitted when zero.
+The same values are recorded on trace spans through
+`trace.LLMCallData.CacheCreationInputTokens` / `CacheReadInputTokens`
+(`trace/logger` emits `cache_creation_input_tokens` / `cache_read_input_tokens`;
+`trace/otel` sets `llm.cache_creation_input_tokens` /
+`llm.cache_read_input_tokens`). They are omitted when zero. The same provider
+asymmetry applies: `CacheCreationInputTokens` is reported by Claude only, so `0`
+on OpenAI or Gemini does not mean the cache missed.
 
 ## Enabling Claude prompt caching
 
@@ -64,7 +67,19 @@ or on a standalone session:
 session, err := client.NewSession(ctx, gollem.WithSessionPromptCache(true))
 ```
 
-Both default to disabled. When enabled, gollem adds `cache_control` breakpoints
+or on a one-shot structured query:
+
+```go
+resp, err := gollem.Query[Answer](ctx, client, prompt,
+    gollem.WithQuerySystemPrompt(sharedSystemPrompt),
+    gollem.WithQueryPromptCache(true),
+)
+```
+
+A single query rarely hits the cache on its own; this pays off for recurring
+queries that share the same system prompt.
+
+All three default to disabled. When enabled, gollem adds `cache_control` breakpoints
 to the Claude request in up to three places:
 
 - the **system prompt** (last block),

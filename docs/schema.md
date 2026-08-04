@@ -99,6 +99,7 @@ fmt.Printf("Tokens used: %d input, %d output\n",
 | `WithQuerySystemPrompt(string)` | Set the system prompt for the query |
 | `WithQueryHistory(*History)` | Provide conversation history |
 | `WithQueryMaxRetry(int)` | Maximum retries on JSON parse failure (default: 3) |
+| `WithQueryPromptCache(bool)` | Enable provider prompt caching for the query's session (default: disabled, see [Prompt Caching](prompt-cache.md)) |
 
 ## Session-Based Typed Query with `SessionQuery[T]()`
 

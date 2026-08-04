@@ -3,6 +3,7 @@ package claude
 import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/gollem-dev/gollem"
+	"github.com/m-mizutani/goerr/v2"
 )
 
 // Export convert functions for testing
@@ -50,6 +51,33 @@ func NewSessionWithAPIClient(client apiClient, cfg gollem.SessionConfig, model s
 			MaxTokens:   8192,
 		},
 		cfg: cfg,
+	}, nil
+}
+
+// NewVertexSessionWithClient creates a Vertex session backed by the given Anthropic
+// client for testing. NewWithVertex installs Google auth on its client, so tests
+// that need to drive the Vertex code path against an httptest server must supply
+// their own client here.
+func NewVertexSessionWithClient(client *anthropic.Client, cfg gollem.SessionConfig, model string) (*VertexAnthropicSession, error) {
+	var messages []anthropic.MessageParam
+	if cfg.History() != nil {
+		history, err := ToMessages(cfg.History())
+		if err != nil {
+			return nil, goerr.Wrap(err, "failed to convert history to anthropic.MessageParam")
+		}
+		messages = append(messages, history...)
+	}
+
+	return &VertexAnthropicSession{
+		client:       client,
+		defaultModel: model,
+		params: generationParameters{
+			Temperature: -1.0,
+			TopP:        -1.0,
+			MaxTokens:   8192,
+		},
+		cfg:      cfg,
+		messages: messages,
 	}, nil
 }
 

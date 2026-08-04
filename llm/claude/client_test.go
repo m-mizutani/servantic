@@ -771,6 +771,53 @@ func TestClaudePromptCacheWiring(t *testing.T) {
 	t.Run("disabled leaves request unmarked", runTest(false))
 }
 
+// captureHandler records the *trace.LLMCallData handed to EndLLMCall. Asserting on
+// the handler argument pins the contract that consumers actually depend on; reading
+// it back from a Recorder span would instead prove how the Recorder stores it.
+type captureHandler struct {
+	trace.Handler
+	llmCall  *trace.LLMCallData
+	llmErr   error
+	endCalls int
+}
+
+func newCaptureHandler() *captureHandler {
+	return &captureHandler{Handler: trace.New()}
+}
+
+func (h *captureHandler) EndLLMCall(ctx context.Context, data *trace.LLMCallData, err error) {
+	h.endCalls++
+	h.llmCall = data
+	h.llmErr = err
+	h.Handler.EndLLMCall(ctx, data, err)
+}
+
+// start opens the root agent span and registers h on the returned context, so
+// llm_call spans created by the session have a parent.
+func (h *captureHandler) start(ctx context.Context) context.Context {
+	return trace.WithHandler(h.StartAgentExecute(ctx), h)
+}
+
+// llmCallData returns the captured data, failing the test when EndLLMCall was
+// never called with it.
+func (h *captureHandler) llmCallData(t *testing.T) *trace.LLMCallData {
+	t.Helper()
+	if h.llmCall == nil {
+		t.Fatal("EndLLMCall did not receive LLMCallData")
+	}
+	return h.llmCall
+}
+
+// cacheTraceCase pins one Claude usage shape to the token counts that both the
+// response and the trace data must report for it.
+type cacheTraceCase struct {
+	usage        anthropic.Usage
+	wantInput    int
+	wantOutput   int
+	wantCreation int
+	wantRead     int
+}
+
 func TestClaudeCacheTokenObservation(t *testing.T) {
 	mockClient := &apiClientMock{
 		MessagesNewFunc: func(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
@@ -802,66 +849,189 @@ func TestClaudeCacheTokenObservation(t *testing.T) {
 	gt.Equal(t, 100, resp.CacheReadInputToken)
 }
 
-func TestClaudeStreamPromptCacheAndObservation(t *testing.T) {
-	var sent anthropic.MessageNewParams
-	mockClient := &apiClientMock{
-		MessagesNewFunc: func(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
-			sent = params
-			return &anthropic.Message{
-				Content: []anthropic.ContentBlockUnion{{Type: "text", Text: "streamed"}},
-				Role:    "assistant",
-				Model:   "claude-3-opus-20240229",
-				Usage: anthropic.Usage{
-					InputTokens:          30,
-					OutputTokens:         5,
-					CacheReadInputTokens: 120,
+// TestClaudeGeneratePromptCacheTrace pins the blocking path, which is what
+// gollem.New uses by default (ResponseModeBlocking): the registered trace handler
+// must receive the prompt-cache token breakdown, not only the returned Response.
+func TestClaudeGeneratePromptCacheTrace(t *testing.T) {
+	runTest := func(tc cacheTraceCase) func(t *testing.T) {
+		return func(t *testing.T) {
+			mockClient := &apiClientMock{
+				MessagesNewFunc: func(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+					return &anthropic.Message{
+						Content: []anthropic.ContentBlockUnion{{Type: "text", Text: "ok"}},
+						Role:    "assistant",
+						Model:   "claude-3-opus-20240229",
+						Usage:   tc.usage,
+					}, nil
 				},
-			}, nil
+			}
+
+			cfg := gollem.NewSessionConfig(gollem.WithSessionPromptCache(true))
+			session, err := claude.NewSessionWithAPIClient(mockClient, cfg, "claude-3-opus-20240229")
+			gt.NoError(t, err)
+
+			h := newCaptureHandler()
+			ctx := h.start(context.Background())
+
+			resp, err := session.Generate(ctx, []gollem.Input{gollem.Text("hi")})
+			gt.NoError(t, err)
+
+			gt.Equal(t, tc.wantInput, resp.InputToken)
+			gt.Equal(t, tc.wantOutput, resp.OutputToken)
+			gt.Equal(t, tc.wantCreation, resp.CacheCreationInputToken)
+			gt.Equal(t, tc.wantRead, resp.CacheReadInputToken)
+
+			gt.Equal(t, 1, h.endCalls)
+			gt.Nil(t, h.llmErr)
+			data := h.llmCallData(t)
+			gt.Equal(t, tc.wantInput, data.InputTokens)
+			gt.Equal(t, tc.wantOutput, data.OutputTokens)
+			gt.Equal(t, tc.wantCreation, data.CacheCreationInputTokens)
+			gt.Equal(t, tc.wantRead, data.CacheReadInputTokens)
+		}
+	}
+
+	t.Run("cache write and read", runTest(cacheTraceCase{
+		usage: anthropic.Usage{
+			InputTokens:              40,
+			OutputTokens:             9,
+			CacheCreationInputTokens: 60,
+			CacheReadInputTokens:     200,
 		},
-	}
+		wantInput:    300, // 40 post-breakpoint + 60 written + 200 cached
+		wantOutput:   9,
+		wantCreation: 60,
+		wantRead:     200,
+	}))
 
-	cfg := gollem.NewSessionConfig(
-		gollem.WithSessionSystemPrompt("sys"),
-		gollem.WithSessionPromptCache(true),
-	)
-	session, err := claude.NewSessionWithAPIClient(mockClient, cfg, "claude-3-opus-20240229")
-	gt.NoError(t, err)
+	t.Run("cache read only", runTest(cacheTraceCase{
+		usage: anthropic.Usage{
+			InputTokens:          30,
+			OutputTokens:         5,
+			CacheReadInputTokens: 120,
+		},
+		wantInput:  150,
+		wantOutput: 5,
+		wantRead:   120,
+	}))
 
-	rec := trace.New()
-	ctx := rec.StartAgentExecute(context.Background())
-	ctx = trace.WithHandler(ctx, rec)
+	t.Run("no cache", runTest(cacheTraceCase{
+		usage: anthropic.Usage{
+			InputTokens:  25,
+			OutputTokens: 4,
+		},
+		wantInput:  25,
+		wantOutput: 4,
+	}))
 
-	ch, err := session.Stream(ctx, []gollem.Input{gollem.Text("hi")})
-	gt.NoError(t, err)
+	t.Run("api error ends the span without data", func(t *testing.T) {
+		errAPI := errors.New("boom")
+		mockClient := &apiClientMock{
+			MessagesNewFunc: func(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+				return nil, errAPI
+			},
+		}
 
-	var gotCacheRead, gotInput int
-	for resp := range ch {
-		gt.NoError(t, resp.Error)
-		if resp.InputToken > 0 {
-			gotInput = resp.InputToken
-			gotCacheRead = resp.CacheReadInputToken
+		session, err := claude.NewSessionWithAPIClient(mockClient, gollem.NewSessionConfig(), "claude-3-opus-20240229")
+		gt.NoError(t, err)
+
+		h := newCaptureHandler()
+		ctx := h.start(context.Background())
+
+		_, err = session.Generate(ctx, []gollem.Input{gollem.Text("hi")})
+		gt.Error(t, err)
+
+		// The handler must be told the call failed, with no token data to record.
+		gt.Equal(t, 1, h.endCalls)
+		gt.Nil(t, h.llmCall)
+		gt.True(t, errors.Is(h.llmErr, errAPI))
+	})
+}
+
+func TestClaudeStreamPromptCacheAndObservation(t *testing.T) {
+	runTest := func(tc cacheTraceCase) func(t *testing.T) {
+		return func(t *testing.T) {
+			var sent anthropic.MessageNewParams
+			mockClient := &apiClientMock{
+				MessagesNewFunc: func(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
+					sent = params
+					return &anthropic.Message{
+						Content: []anthropic.ContentBlockUnion{{Type: "text", Text: "streamed"}},
+						Role:    "assistant",
+						Model:   "claude-3-opus-20240229",
+						Usage:   tc.usage,
+					}, nil
+				},
+			}
+
+			cfg := gollem.NewSessionConfig(
+				gollem.WithSessionSystemPrompt("sys"),
+				gollem.WithSessionPromptCache(true),
+			)
+			session, err := claude.NewSessionWithAPIClient(mockClient, cfg, "claude-3-opus-20240229")
+			gt.NoError(t, err)
+
+			h := newCaptureHandler()
+			ctx := h.start(context.Background())
+
+			ch, err := session.Stream(ctx, []gollem.Input{gollem.Text("hi")})
+			gt.NoError(t, err)
+
+			var gotInput, gotOutput, gotCreation, gotRead int
+			for resp := range ch {
+				gt.NoError(t, resp.Error)
+				if resp.InputToken > 0 {
+					gotInput = resp.InputToken
+					gotOutput = resp.OutputToken
+					gotCreation = resp.CacheCreationInputToken
+					gotRead = resp.CacheReadInputToken
+				}
+			}
+			h.EndAgentExecute(ctx, nil)
+
+			// Streaming reports total input and the cache breakdown.
+			gt.Equal(t, tc.wantInput, gotInput)
+			gt.Equal(t, tc.wantOutput, gotOutput)
+			gt.Equal(t, tc.wantCreation, gotCreation)
+			gt.Equal(t, tc.wantRead, gotRead)
+
+			// The stream request carried the cache_control marker on the system prefix.
+			gt.Equal(t, anthropic.CacheControlEphemeralTTLTTL5m, sent.System[len(sent.System)-1].CacheControl.TTL)
+
+			// The registered trace handler receives the same breakdown.
+			gt.Equal(t, 1, h.endCalls)
+			gt.Nil(t, h.llmErr)
+			data := h.llmCallData(t)
+			gt.Equal(t, tc.wantInput, data.InputTokens)
+			gt.Equal(t, tc.wantOutput, data.OutputTokens)
+			gt.Equal(t, tc.wantCreation, data.CacheCreationInputTokens)
+			gt.Equal(t, tc.wantRead, data.CacheReadInputTokens)
 		}
 	}
-	rec.EndAgentExecute(ctx, nil)
 
-	// Streaming reports total input and the cached read count.
-	gt.Equal(t, 150, gotInput) // 30 post-breakpoint + 120 cached
-	gt.Equal(t, 120, gotCacheRead)
+	t.Run("cache read only", runTest(cacheTraceCase{
+		usage: anthropic.Usage{
+			InputTokens:          30,
+			OutputTokens:         5,
+			CacheReadInputTokens: 120,
+		},
+		wantInput:  150, // 30 post-breakpoint + 120 cached
+		wantOutput: 5,
+		wantRead:   120,
+	}))
 
-	// The stream request carried the cache_control marker on the system prefix.
-	gt.Equal(t, anthropic.CacheControlEphemeralTTLTTL5m, sent.System[len(sent.System)-1].CacheControl.TTL)
-
-	// Trace records the cache breakdown.
-	var llmSpan *trace.Span
-	for _, child := range rec.Trace().RootSpan.Children {
-		if child.Kind == trace.SpanKindLLMCall {
-			llmSpan = child
-			break
-		}
-	}
-	gt.Value(t, llmSpan).NotNil()
-	gt.Equal(t, 120, llmSpan.LLMCall.CacheReadInputTokens)
-	gt.Equal(t, 150, llmSpan.LLMCall.InputTokens)
+	t.Run("cache write and read", runTest(cacheTraceCase{
+		usage: anthropic.Usage{
+			InputTokens:              30,
+			OutputTokens:             5,
+			CacheCreationInputTokens: 45,
+			CacheReadInputTokens:     120,
+		},
+		wantInput:    195,
+		wantOutput:   5,
+		wantCreation: 45,
+		wantRead:     120,
+	}))
 }
 
 // TestClaudePromptCacheLive exercises the real Claude API to confirm that

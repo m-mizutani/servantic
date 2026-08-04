@@ -2,10 +2,15 @@ package claude_test
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/gollem-dev/gollem"
 	"github.com/gollem-dev/gollem/llm/claude"
 	"github.com/m-mizutani/gt"
@@ -52,6 +57,90 @@ func TestNewWithVertex(t *testing.T) {
 		// If it succeeds, validate the configuration
 		gt.NotNil(t, client)
 	})
+}
+
+// vertexTraceResponse is a fixed Anthropic message payload with a prompt-cache
+// usage breakdown. The Vertex path calls anthropic.Client directly instead of the
+// apiClient interface, so it is driven over the wire rather than with a mock.
+const vertexTraceResponse = `{
+  "id": "msg_test",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-4@20250514",
+  "content": [{"type": "text", "text": "ok"}],
+  "stop_reason": "end_turn",
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 3,
+    "cache_creation_input_tokens": 34,
+    "cache_read_input_tokens": 56
+  }
+}`
+
+func TestVertexGeneratePromptCacheTrace(t *testing.T) {
+	type systemBlock struct {
+		CacheControl map[string]any `json:"cache_control"`
+	}
+	type sentRequest struct {
+		System []systemBlock `json:"system"`
+	}
+
+	sentCh := make(chan sentRequest, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var sent sentRequest
+		if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		sentCh <- sent
+
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := w.Write([]byte(vertexTraceResponse)); err != nil {
+			// The client has already gone away, so nothing can be recovered here.
+			// A truncated response surfaces as an error from Generate, which the
+			// assertions below catch.
+			return
+		}
+	}))
+	defer srv.Close()
+
+	client := anthropic.NewClient(
+		option.WithBaseURL(srv.URL),
+		option.WithAPIKey("test"),
+	)
+	cfg := gollem.NewSessionConfig(
+		gollem.WithSessionSystemPrompt("sys"),
+		gollem.WithSessionPromptCache(true),
+	)
+	session, err := claude.NewVertexSessionWithClient(&client, cfg, "claude-sonnet-4@20250514")
+	gt.NoError(t, err)
+
+	h := newCaptureHandler()
+	ctx := h.start(context.Background())
+
+	resp, err := session.Generate(ctx, []gollem.Input{gollem.Text("hi")})
+	gt.NoError(t, err)
+
+	gt.Equal(t, 102, resp.InputToken) // 12 post-breakpoint + 34 written + 56 cached
+	gt.Equal(t, 3, resp.OutputToken)
+	gt.Equal(t, 34, resp.CacheCreationInputToken)
+	gt.Equal(t, 56, resp.CacheReadInputToken)
+
+	// The registered trace handler receives the same breakdown.
+	gt.Equal(t, 1, h.endCalls)
+	gt.Nil(t, h.llmErr)
+	data := h.llmCallData(t)
+	gt.Equal(t, 102, data.InputTokens)
+	gt.Equal(t, 3, data.OutputTokens)
+	gt.Equal(t, 34, data.CacheCreationInputTokens)
+	gt.Equal(t, 56, data.CacheReadInputTokens)
+
+	// The request carried the cache_control marker on the system prefix.
+	sent := <-sentCh
+	if len(sent.System) == 0 {
+		t.Fatal("request carried no system prompt")
+	}
+	gt.NotNil(t, sent.System[len(sent.System)-1].CacheControl)
 }
 
 func TestVertexClient(t *testing.T) {

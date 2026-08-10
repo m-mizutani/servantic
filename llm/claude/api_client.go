@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 )
 
@@ -20,7 +21,7 @@ type realAPIClient struct {
 }
 
 func (r *realAPIClient) MessagesNew(ctx context.Context, params anthropic.MessageNewParams) (*anthropic.Message, error) {
-	return r.client.Messages.New(ctx, params)
+	return r.client.Messages.New(ctx, params, option.WithRequestTimeout(defaultNonStreamingTimeout))
 }
 
 func (r *realAPIClient) MessagesNewStreaming(ctx context.Context, params anthropic.MessageNewParams) *ssestream.Stream[anthropic.MessageStreamEventUnion] {

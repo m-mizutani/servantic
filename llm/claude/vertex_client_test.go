@@ -51,6 +51,24 @@ func TestNewWithVertex(t *testing.T) {
 
 		// If it succeeds, validate the configuration
 		gt.NotNil(t, client)
+		gt.Equal(t, int64(2048), claude.VertexMaxTokensOf(client))
+	})
+
+	t.Run("resolves max tokens from the model when not set", func(t *testing.T) {
+		prj, ok := os.LookupEnv("TEST_CLAUDE_VERTEX_AI_PROJECT_ID")
+		if !ok {
+			t.Skip("TEST_CLAUDE_VERTEX_AI_PROJECT_ID is not set")
+		}
+		client, err := claude.NewWithVertex(ctx, "us-central1", prj,
+			claude.WithVertexModel("claude-opus-4-5@20251101"),
+		)
+		if err != nil {
+			// Expected in test environment without GCP credentials
+			gt.True(t, strings.Contains(err.Error(), "failed to") || strings.Contains(err.Error(), "auth"))
+			return
+		}
+
+		gt.Equal(t, int64(64000), claude.VertexMaxTokensOf(client))
 	})
 }
 

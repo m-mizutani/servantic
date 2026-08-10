@@ -66,9 +66,13 @@ func WithVertexTopP(topP float64) VertexOption {
 }
 
 // WithVertexMaxTokens sets the maximum number of tokens to generate.
+// When not set, the model's documented maximum output tokens is used.
+// A value the API does not accept, such as zero or one above the model's
+// limit, is sent as given and rejected by the API.
 func WithVertexMaxTokens(maxTokens int64) VertexOption {
 	return func(c *VertexClient) {
 		c.params.MaxTokens = maxTokens
+		c.params.maxTokensSet = true
 	}
 }
 
@@ -95,12 +99,17 @@ func NewWithVertex(ctx context.Context, region, projectID string, options ...Ver
 		params: generationParameters{
 			Temperature: -1.0, // -1 indicates not set (0.0 is valid)
 			TopP:        -1.0, // -1 indicates not set (0.0 is valid)
-			MaxTokens:   8192,
 		},
 	}
 
 	for _, opt := range options {
 		opt(client)
+	}
+
+	// The Messages API requires max_tokens, so it cannot be omitted. Fill in
+	// the model's documented ceiling only when the caller did not choose one.
+	if !client.params.maxTokensSet {
+		client.params.MaxTokens = resolveMaxOutputTokens(client.defaultModel)
 	}
 
 	// Create Anthropic client with Vertex AI integration
@@ -229,7 +238,7 @@ func (s *VertexAnthropicSession) Generate(ctx context.Context, input []gollem.In
 		applyPromptCacheBreakpoints(&msgParams)
 	}
 
-	resp, err := s.client.Messages.New(ctx, msgParams)
+	resp, err := s.client.Messages.New(ctx, msgParams, option.WithRequestTimeout(defaultNonStreamingTimeout))
 	if err != nil {
 		llmErr = err
 		opts := tokenLimitErrorOptions(err)

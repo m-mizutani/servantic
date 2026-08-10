@@ -175,11 +175,31 @@ Note: Claude Opus 4.1 and Sonnet 4 are hybrid models offering both instant and e
 client, err := claude.New(ctx, apiKey,
     claude.WithTemperature(0.7),  // Optional: use either temperature OR top_p, not both
     // claude.WithTopP(0.9),      // Alternative to temperature
-    claude.WithMaxTokens(8192),   // Optional (default: 8192)
+    claude.WithMaxTokens(8192),   // Optional, see "Max tokens" below
 )
 ```
 
 **Note**: Claude Sonnet 4.5 does not allow both `temperature` and `top_p` to be specified simultaneously. Use one or the other.
+
+#### Max tokens
+
+The Anthropic Messages API requires `max_tokens` on every request, so gollem always sends a value. When `WithMaxTokens` is not called, gollem sends the model's documented maximum output tokens:
+
+| Model | Max output tokens |
+| --- | --- |
+| Fable 5, Mythos 5, Opus 5, Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5, Sonnet 4.6 | 128000 |
+| Opus 4.5, Sonnet 4.5, Haiku 4.5 | 64000 |
+| Any other model | 64000 |
+
+Model IDs are matched in all three forms: the Claude API dated form (`claude-sonnet-4-5-20250929`), the alias form (`claude-sonnet-4-5`), and the Vertex AI form (`claude-sonnet-4-5@20250929`). Only an 8 digit date suffix is stripped before matching, so an ID such as `claude-opus-5@custom` stays distinct from `claude-opus-5` and falls back rather than inheriting its limit.
+
+A model that is not in the table — a model released after this table was written, or a model served through a compatible endpoint configured with `WithBaseURL` — falls back to 64000. If that model's real limit is lower, call `WithMaxTokens` explicitly.
+
+`WithMaxTokens` always wins over the resolved value, and a per-call `gollem.WithMaxTokens` wins over both. An explicit value is sent as given and never adjusted, so a value the API does not accept — zero, a negative number, or one above the model's limit — is rejected by the API rather than corrected by gollem.
+
+**Note**: gollem previously defaulted to 8192 regardless of model. If your code relied on that cap to bound output length or cost, call `WithMaxTokens(8192)` explicitly.
+
+**Note**: `max_tokens` is a ceiling, not a reservation — it does not by itself make a request slower or more expensive. But a response that actually approaches the ceiling takes time to generate, and `Generate` waits for the whole response. The default request timeout is 30 seconds (`WithTimeout`); raise it before expecting long outputs.
 
 ### Environment Variables
 
@@ -215,6 +235,16 @@ Available models on Vertex AI:
 - `claude-sonnet-4@20250514` - Latest Claude Sonnet model
 - `claude-3-5-sonnet@20241022` - Previous generation Sonnet
 - `claude-3-5-haiku@20241022` - Fast, cost-effective model
+
+#### Max Tokens
+
+```go
+client, err := claude.NewWithVertex(ctx, region, projectID,
+    claude.WithVertexMaxTokens(8192),  // Optional
+)
+```
+
+`WithVertexMaxTokens` follows the same rules as `claude.WithMaxTokens` — see [Max tokens](#max-tokens) above. Vertex AI model IDs use `@` as the version separator (`claude-sonnet-4-5@20250929`) and are matched against the same table.
 
 #### System Prompt
 

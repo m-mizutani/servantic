@@ -920,3 +920,95 @@ func TestClaudePromptCacheLive(t *testing.T) {
 	// InputToken keeps total-input semantics: it includes the cached prefix.
 	gt.Value(t, second.InputToken >= second.CacheReadInputToken).Equal(true)
 }
+
+func TestNewMaxTokens(t *testing.T) {
+	type testCase struct {
+		options  []claude.Option
+		expected int64
+	}
+
+	runTest := func(tc testCase) func(t *testing.T) {
+		return func(t *testing.T) {
+			client, err := claude.New(context.Background(), "test-key", tc.options...)
+			gt.NoError(t, err).Required()
+			gt.Equal(t, tc.expected, claude.MaxTokensOf(client))
+		}
+	}
+
+	t.Run("resolves the default model when max tokens is not set", runTest(testCase{
+		expected: 64000, // claude-sonnet-4-5-20250929
+	}))
+
+	t.Run("resolves the model given by WithModel", runTest(testCase{
+		options:  []claude.Option{claude.WithModel("claude-opus-5")},
+		expected: 128000,
+	}))
+
+	t.Run("falls back for a model absent from the table", runTest(testCase{
+		options:  []claude.Option{claude.WithModel("my-proxy/llm")},
+		expected: claude.FallbackMaxOutputTokens,
+	}))
+
+	t.Run("keeps an explicit max tokens", runTest(testCase{
+		options:  []claude.Option{claude.WithMaxTokens(1000)},
+		expected: 1000,
+	}))
+
+	t.Run("keeps an explicit max tokens above the model limit", runTest(testCase{
+		options: []claude.Option{
+			claude.WithModel("claude-sonnet-4-5"),
+			claude.WithMaxTokens(200000),
+		},
+		expected: 200000,
+	}))
+
+	t.Run("keeps an explicit max tokens regardless of option order", runTest(testCase{
+		options: []claude.Option{
+			claude.WithMaxTokens(1000),
+			claude.WithModel("claude-opus-5"),
+		},
+		expected: 1000,
+	}))
+
+	// An explicit value is never second-guessed, so it reaches the API even
+	// when the API will reject it. This matches gollem.WithMaxTokens, which
+	// distinguishes "set to zero" from "not set" and sends the zero through.
+	t.Run("keeps an explicit zero", runTest(testCase{
+		options:  []claude.Option{claude.WithMaxTokens(0)},
+		expected: 0,
+	}))
+
+	t.Run("keeps an explicit negative value", runTest(testCase{
+		options:  []claude.Option{claude.WithMaxTokens(-1)},
+		expected: -1,
+	}))
+}
+
+// TestGenerateWithResolvedMaxTokens drives New -> NewSession -> Generate/Stream
+// through the real SDK so the resolved ceiling is checked against the SDK's
+// non-streaming guard, which a mocked apiClient bypasses. The request is aimed
+// at a closed port: reaching a transport error means the guard let it through.
+func TestGenerateWithResolvedMaxTokens(t *testing.T) {
+	ctx := context.Background()
+
+	const guardMessage = "streaming is required"
+
+	client, err := claude.New(ctx, "test-key", claude.WithBaseURL("http://127.0.0.1:1/"))
+	gt.NoError(t, err).Required()
+	gt.Equal(t, int64(64000), claude.MaxTokensOf(client))
+
+	session, err := client.NewSession(ctx)
+	gt.NoError(t, err).Required()
+
+	t.Run("Generate", func(t *testing.T) {
+		_, err := session.Generate(ctx, []gollem.Input{gollem.Text("hello")})
+		gt.Error(t, err).Required()
+		gt.False(t, strings.Contains(err.Error(), guardMessage))
+	})
+
+	t.Run("Stream", func(t *testing.T) {
+		_, err := session.Stream(ctx, []gollem.Input{gollem.Text("hello")})
+		gt.Error(t, err).Required()
+		gt.False(t, strings.Contains(err.Error(), guardMessage))
+	})
+}

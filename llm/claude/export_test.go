@@ -15,7 +15,18 @@ var (
 	ClaudeMessagesToTraceMessages = claudeMessagesToTraceMessages
 	ApplyPromptCacheBreakpoints   = applyPromptCacheBreakpoints
 	CacheTokensFromUsage          = cacheTokensFromUsage
+	NormalizeModelID              = normalizeModelID
+	ResolveMaxOutputTokens        = resolveMaxOutputTokens
 )
+
+// FallbackMaxOutputTokens is the max tokens used for models absent from the table.
+const FallbackMaxOutputTokens = fallbackMaxOutputTokens
+
+// MaxTokensOf returns the resolved max tokens of a Claude client for testing.
+func MaxTokensOf(client *Client) int64 { return client.params.MaxTokens }
+
+// VertexMaxTokensOf returns the resolved max tokens of a Vertex client for testing.
+func VertexMaxTokensOf(client *VertexClient) int64 { return client.params.MaxTokens }
 
 type JsonSchema = jsonSchema
 
@@ -47,7 +58,7 @@ func NewSessionWithAPIClient(client apiClient, cfg gollem.SessionConfig, model s
 		params: generationParameters{
 			Temperature: -1.0,
 			TopP:        -1.0,
-			MaxTokens:   8192,
+			MaxTokens:   resolveMaxOutputTokens(model),
 		},
 		cfg: cfg,
 	}, nil

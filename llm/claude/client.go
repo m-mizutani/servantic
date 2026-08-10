@@ -30,7 +30,23 @@ type generationParameters struct {
 
 	// MaxTokens limits the number of tokens to generate.
 	MaxTokens int64
+
+	// maxTokensSet records whether the caller chose MaxTokens. The constructor
+	// resolves the model's documented maximum only when it did not, so an
+	// explicit value is always sent as given, including an invalid one.
+	maxTokensSet bool
 }
+
+// defaultNonStreamingTimeout is the request timeout attached to every
+// non-streaming Messages call.
+//
+// It matches the SDK's own default for such requests, so the effective timeout
+// is unchanged. Supplying it explicitly is what matters: the SDK otherwise
+// derives a timeout from max_tokens and refuses to send anything it estimates
+// at over 10 minutes, which rejects the model ceilings resolved by
+// resolveMaxOutputTokens before the request leaves the process.
+// See anthropic-sdk-go CalculateNonStreamingTimeout.
+const defaultNonStreamingTimeout = 10 * time.Minute
 
 // setTemperatureAndTopP sets temperature and/or top_p on the request params.
 // Claude does not allow both to be specified simultaneously.
@@ -107,10 +123,13 @@ func WithTopP(topP float64) Option {
 }
 
 // WithMaxTokens sets the maximum number of tokens to generate.
-// Default: 8192
+// When not set, the model's documented maximum output tokens is used.
+// A value the API does not accept, such as zero or one above the model's
+// limit, is sent as given and rejected by the API.
 func WithMaxTokens(maxTokens int64) Option {
 	return func(c *Client) {
 		c.params.MaxTokens = maxTokens
+		c.params.maxTokensSet = true
 	}
 }
 
@@ -148,13 +167,18 @@ func New(ctx context.Context, apiKey string, options ...Option) (*Client, error)
 		params: generationParameters{
 			Temperature: -1.0, // -1 indicates not set (0.0 is valid)
 			TopP:        -1.0, // -1 indicates not set (0.0 is valid)
-			MaxTokens:   8192,
 		},
 		timeout: 30 * time.Second, // Default timeout
 	}
 
 	for _, option := range options {
 		option(client)
+	}
+
+	// The Messages API requires max_tokens, so it cannot be omitted. Fill in
+	// the model's documented ceiling only when the caller did not choose one.
+	if !client.params.maxTokensSet {
+		client.params.MaxTokens = resolveMaxOutputTokens(client.defaultModel)
 	}
 
 	clientOptions := []option.RequestOption{

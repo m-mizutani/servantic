@@ -65,39 +65,115 @@ func unmarshalPartMeta(meta json.RawMessage) (partMeta, error) {
 	return m, nil
 }
 
+// hasNonTextContent reports whether a part carries content beyond plain text.
+// Every such field has to stay bound to the exact part that carries it, so this
+// single list is what both isEmptyPart and isTextOnlyPart are defined against.
+func hasNonTextContent(part *genai.Part) bool {
+	return part.FunctionCall != nil ||
+		part.FunctionResponse != nil ||
+		part.InlineData != nil ||
+		part.FileData != nil ||
+		part.ExecutableCode != nil ||
+		part.CodeExecutionResult != nil ||
+		len(part.ThoughtSignature) > 0
+}
+
 // isEmptyPart returns true if a Gemini part has no meaningful content.
 // Some models (e.g., thinking models) may return empty parts that should be skipped.
 func isEmptyPart(part *genai.Part) bool {
-	return part.Text == "" &&
-		!part.Thought &&
-		part.FunctionCall == nil &&
-		part.FunctionResponse == nil &&
-		part.InlineData == nil &&
-		part.FileData == nil &&
-		part.ExecutableCode == nil &&
-		part.CodeExecutionResult == nil &&
-		len(part.ThoughtSignature) == 0
+	return part.Text == "" && !part.Thought && !hasNonTextContent(part)
 }
 
-// filterEmptyParts removes empty parts from a Content and returns a new Content.
-// Returns nil if all parts are empty.
-func filterEmptyParts(content *genai.Content) *genai.Content {
+// isConvertiblePart reports whether convertGeminiPart can represent the part in
+// the portable history format.
+func isConvertiblePart(part *genai.Part) bool {
+	return part.Thought ||
+		part.Text != "" ||
+		part.InlineData != nil ||
+		part.FileData != nil ||
+		part.FunctionCall != nil ||
+		part.FunctionResponse != nil ||
+		len(part.ThoughtSignature) > 0
+}
+
+// newHistoryContent normalizes a model response before it is stored in the
+// session history. Returns nil when nothing is left worth storing.
+func newHistoryContent(content *genai.Content) *genai.Content {
 	if content == nil {
 		return nil
 	}
-	filtered := make([]*genai.Part, 0, len(content.Parts))
+
+	parts := make([]*genai.Part, 0, len(content.Parts))
 	for _, part := range content.Parts {
-		if !isEmptyPart(part) {
-			filtered = append(filtered, part)
+		// A thought summary only has to travel back to Gemini as its signature.
+		// Keeping the reasoning text would re-send it on every later turn, and
+		// it would round-trip as a thinking block whose signature no other
+		// provider can read once the history is handed over.
+		if part.Thought {
+			if len(part.ThoughtSignature) > 0 {
+				parts = append(parts, &genai.Part{ThoughtSignature: part.ThoughtSignature})
+			}
+			continue
 		}
+		// A part convertGeminiPart cannot represent (executable code, code
+		// execution results) would make every later History() call fail on the
+		// whole session, so it is left out instead of stored unconvertible.
+		if !isConvertiblePart(part) {
+			continue
+		}
+		parts = append(parts, part)
 	}
-	if len(filtered) == 0 {
+
+	if len(parts) == 0 {
 		return nil
 	}
 	return &genai.Content{
 		Role:  content.Role,
-		Parts: filtered,
+		Parts: parts,
 	}
+}
+
+// isTextOnlyPart reports whether a part carries text and nothing else, making
+// it safe to concatenate with an adjacent text part.
+func isTextOnlyPart(part *genai.Part) bool {
+	return part.Text != "" && !hasNonTextContent(part)
+}
+
+// mergeStreamedParts joins consecutive text-only parts of a streamed response
+// into a single part. Streaming delivers text in many small deltas, and keeping
+// each delta as its own history part would multiply the serialized history for
+// no gain. Parts carrying a thought signature or a function call are passed
+// through untouched so Gemini 3.x can still match them on the next turn.
+func mergeStreamedParts(parts []*genai.Part) []*genai.Part {
+	merged := make([]*genai.Part, 0, len(parts))
+
+	var buf strings.Builder
+	var bufThought bool
+	flush := func() {
+		if buf.Len() == 0 {
+			return
+		}
+		merged = append(merged, &genai.Part{Text: buf.String(), Thought: bufThought})
+		buf.Reset()
+	}
+
+	for _, part := range parts {
+		if isTextOnlyPart(part) {
+			// Thought text and answer text are distinct kinds of content and
+			// must not be concatenated into one part.
+			if buf.Len() > 0 && bufThought != part.Thought {
+				flush()
+			}
+			bufThought = part.Thought
+			buf.WriteString(part.Text)
+			continue
+		}
+		flush()
+		merged = append(merged, part)
+	}
+	flush()
+
+	return merged
 }
 
 // convertGeminiToMessages converts Gemini contents to common Message format

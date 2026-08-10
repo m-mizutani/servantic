@@ -74,9 +74,23 @@ client, err := gemini.New(ctx, projectID, location,
 )
 ```
 
-Available levels (lowest → highest): `ThinkingLevelMinimal`, `ThinkingLevelLow`, `ThinkingLevelMedium`, `ThinkingLevelHigh`. `gemini.New` defaults to `ThinkingLevelLow`; override it explicitly for tasks that need more reasoning.
+Available levels (lowest → highest): `ThinkingLevelMinimal`, `ThinkingLevelLow`, `ThinkingLevelMedium`, `ThinkingLevelHigh`.
+
+Without `WithThinkingLevel` (or `WithThinkingBudget`), gollem sends no thinking configuration at all and each model applies its own default — `MEDIUM` for Gemini 3.5 / 3.6 Flash, `HIGH` for Gemini 3 Pro, `MINIMAL` for Gemini 3.5 Flash Lite. Not every model accepts every level (`gemini-3-pro-preview` takes only `LOW` and `HIGH`), so set the level only when you know the model supports it.
 
 Note: Gemini 3.x also deprecates `temperature`, `top_p`, and `top_k` — omit those options when using 3.x models.
+
+#### Thought Summaries
+
+Gemini returns the model's reasoning text only when thought summaries are requested. Without this option `Response.Thoughts` is always empty:
+
+```go
+client, err := gemini.New(ctx, projectID, location,
+    gemini.WithIncludeThoughts(true),
+)
+```
+
+This affects the reasoning text only. The thought signatures that Gemini 3.x requires for multi-turn tool calling are returned and stored in history regardless of this setting, in both blocking and streaming modes.
 
 #### Thinking Budget (Gemini 2.x)
 

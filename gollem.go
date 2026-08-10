@@ -572,6 +572,7 @@ func (g *Agent) Execute(ctx context.Context, input ...Input) (_ *ExecuteResponse
 				// latest non-zero value rather than summing to avoid multiplying
 				// the usage by the number of chunks.
 				streamedResponse.Texts = append(streamedResponse.Texts, output.Texts...)
+				streamedResponse.Thoughts = append(streamedResponse.Thoughts, output.Thoughts...)
 				streamedResponse.FunctionCalls = append(streamedResponse.FunctionCalls, output.FunctionCalls...)
 				if output.InputToken > 0 {
 					streamedResponse.InputToken = output.InputToken

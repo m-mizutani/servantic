@@ -71,6 +71,9 @@ func ConvertRoleToCommon(role string) gollem.MessageRole {
 
 // MergeSystemIntoFirstUser merges a system message into the first user message
 // This is used for providers that don't support system messages directly (Claude, Gemini)
+//
+// The given slice and its messages are left untouched: the caller's History must survive a
+// conversion unchanged, since the same History is converted again on every later request.
 func MergeSystemIntoFirstUser(messages []gollem.Message) []gollem.Message {
 	if len(messages) == 0 {
 		return messages
@@ -78,10 +81,10 @@ func MergeSystemIntoFirstUser(messages []gollem.Message) []gollem.Message {
 
 	// Find the first system message
 	var systemContent string
-	hasSystem := false
+	systemIndex := -1
 	for i, msg := range messages {
 		if msg.Role == gollem.RoleSystem {
-			hasSystem = true
+			systemIndex = i
 			// Extract text content from system message
 			for _, content := range msg.Contents {
 				if content.Type == gollem.MessageContentTypeText {
@@ -94,18 +97,25 @@ func MergeSystemIntoFirstUser(messages []gollem.Message) []gollem.Message {
 					}
 				}
 			}
-			// Remove system message from the list
-			messages = append(messages[:i], messages[i+1:]...)
 			break
 		}
 	}
 
-	if !hasSystem || systemContent == "" {
+	if systemIndex < 0 {
 		return messages
 	}
 
+	// Remove the system message from the list
+	result := make([]gollem.Message, 0, len(messages)-1)
+	result = append(result, messages[:systemIndex]...)
+	result = append(result, messages[systemIndex+1:]...)
+
+	if systemContent == "" {
+		return result
+	}
+
 	// Find first user message and prepend system content
-	for i, msg := range messages {
+	for i, msg := range result {
 		if msg.Role == gollem.RoleUser {
 			// Prepend system content to first user message
 			newContent := make([]gollem.MessageContent, 0, len(msg.Contents)+1)
@@ -118,12 +128,12 @@ func MergeSystemIntoFirstUser(messages []gollem.Message) []gollem.Message {
 			// Add existing user content
 			newContent = append(newContent, msg.Contents...)
 
-			messages[i].Contents = newContent
+			result[i].Contents = newContent
 			break
 		}
 	}
 
-	return messages
+	return result
 }
 
 // MergeConsecutiveToolMessages merges each run of consecutive tool messages into a single

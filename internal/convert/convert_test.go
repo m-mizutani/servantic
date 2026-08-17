@@ -8,6 +8,80 @@ import (
 	"github.com/m-mizutani/gt"
 )
 
+func TestMergeSystemIntoFirstUser(t *testing.T) {
+	newText := func(t *testing.T, text string) gollem.MessageContent {
+		t.Helper()
+		c, err := gollem.NewTextContent(text)
+		gt.NoError(t, err)
+		return c
+	}
+	textOf := func(t *testing.T, c gollem.MessageContent) string {
+		t.Helper()
+		text, err := c.GetTextContent()
+		gt.NoError(t, err)
+		return text.Text
+	}
+
+	t.Run("prepends the system text to the first user message", func(t *testing.T) {
+		messages := []gollem.Message{
+			{Role: gollem.RoleSystem, Contents: []gollem.MessageContent{newText(t, "be brief")}},
+			{Role: gollem.RoleUser, Contents: []gollem.MessageContent{newText(t, "hello")}},
+			{Role: gollem.RoleAssistant, Contents: []gollem.MessageContent{newText(t, "hi")}},
+			{Role: gollem.RoleUser, Contents: []gollem.MessageContent{newText(t, "again")}},
+		}
+
+		merged := convert.MergeSystemIntoFirstUser(messages)
+
+		gt.Equal(t, 3, len(merged))
+		gt.Equal(t, gollem.RoleUser, merged[0].Role)
+		gt.Equal(t, 2, len(merged[0].Contents))
+		gt.Equal(t, "be brief\n\n", textOf(t, merged[0].Contents[0]))
+		gt.Equal(t, "hello", textOf(t, merged[0].Contents[1]))
+		// Only the first user message receives the system text
+		gt.Equal(t, 1, len(merged[2].Contents))
+	})
+
+	t.Run("does not modify the given messages", func(t *testing.T) {
+		messages := []gollem.Message{
+			{Role: gollem.RoleSystem, Contents: []gollem.MessageContent{newText(t, "be brief")}},
+			{Role: gollem.RoleUser, Contents: []gollem.MessageContent{newText(t, "hello")}},
+			{Role: gollem.RoleAssistant, Contents: []gollem.MessageContent{newText(t, "hi")}},
+		}
+
+		convert.MergeSystemIntoFirstUser(messages)
+
+		gt.Equal(t, 3, len(messages))
+		gt.Equal(t, gollem.RoleSystem, messages[0].Role)
+		gt.Equal(t, gollem.RoleUser, messages[1].Role)
+		gt.Equal(t, 1, len(messages[1].Contents))
+		gt.Equal(t, "hello", textOf(t, messages[1].Contents[0]))
+		gt.Equal(t, gollem.RoleAssistant, messages[2].Role)
+	})
+
+	t.Run("returns the input unchanged when there is no system message", func(t *testing.T) {
+		messages := []gollem.Message{
+			{Role: gollem.RoleUser, Contents: []gollem.MessageContent{newText(t, "hello")}},
+		}
+
+		gt.Equal(t, messages, convert.MergeSystemIntoFirstUser(messages))
+	})
+
+	t.Run("drops a system message that carries no text", func(t *testing.T) {
+		call, err := gollem.NewToolCallContent("c1", "alpha", map[string]any{"x": 1})
+		gt.NoError(t, err)
+		messages := []gollem.Message{
+			{Role: gollem.RoleSystem, Contents: []gollem.MessageContent{call}},
+			{Role: gollem.RoleUser, Contents: []gollem.MessageContent{newText(t, "hello")}},
+		}
+
+		merged := convert.MergeSystemIntoFirstUser(messages)
+
+		gt.Equal(t, 1, len(merged))
+		gt.Equal(t, gollem.RoleUser, merged[0].Role)
+		gt.Equal(t, 1, len(merged[0].Contents))
+	})
+}
+
 func TestMergeConsecutiveToolMessages(t *testing.T) {
 	newText := func(t *testing.T, text string) gollem.MessageContent {
 		t.Helper()

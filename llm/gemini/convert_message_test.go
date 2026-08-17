@@ -455,6 +455,43 @@ func TestFunctionCallIDBackwardCompatNoID(t *testing.T) {
 	gt.Value(t, restored[1].Parts[0].FunctionResponse.ID).Equal("")
 }
 
+func TestToContentsLeavesHistoryUnchanged(t *testing.T) {
+	sys, err := gollem.NewTextContent("be brief")
+	gt.NoError(t, err)
+	user, err := gollem.NewTextContent("hello")
+	gt.NoError(t, err)
+	assistant, err := gollem.NewTextContent("hi")
+	gt.NoError(t, err)
+	resp1, err := gollem.NewToolResponseContent("c1", "alpha", map[string]any{"ok": true}, false)
+	gt.NoError(t, err)
+	resp2, err := gollem.NewToolResponseContent("c2", "beta", map[string]any{"ok": true}, false)
+	gt.NoError(t, err)
+
+	history := &gollem.History{
+		LLType:  gollem.LLMTypeGemini,
+		Version: gollem.HistoryVersion,
+		Messages: []gollem.Message{
+			{Role: gollem.RoleSystem, Contents: []gollem.MessageContent{sys}},
+			{Role: gollem.RoleUser, Contents: []gollem.MessageContent{user}},
+			{Role: gollem.RoleAssistant, Contents: []gollem.MessageContent{assistant}},
+			{Role: gollem.RoleTool, Contents: []gollem.MessageContent{resp1}},
+			{Role: gollem.RoleTool, Contents: []gollem.MessageContent{resp2}},
+		},
+	}
+	before := append([]gollem.Message(nil), history.Messages...)
+
+	first, err := gemini.ToContents(history)
+	gt.NoError(t, err)
+
+	// The same History is converted again on every later request, so a conversion must not
+	// consume the system message or duplicate the trailing message.
+	gt.Equal(t, before, history.Messages)
+
+	second, err := gemini.ToContents(history)
+	gt.NoError(t, err)
+	gt.Equal(t, first, second)
+}
+
 func TestToolResponsesInSeparateMessagesBecomeOneContent(t *testing.T) {
 	text, err := gollem.NewTextContent("go")
 	gt.NoError(t, err)

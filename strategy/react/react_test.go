@@ -679,12 +679,14 @@ func TestReActWithRealLLM(t *testing.T) {
 		// Test: Multi-step reasoning task requiring chained tool usage
 		ctx := context.Background()
 		resp, err := agent.Execute(ctx, gollem.Text(`Find the secret code hidden in the filesystem. You must use the list_directory tool to explore directories and the read_file tool to read file contents. Start from the root directory "/" and systematically explore until you find the secret code.`))
-		gt.NoError(t, err)
-		gt.NotNil(t, resp)
+		// Stop here on failure: the assertions below dereference resp, so continuing
+		// would panic and abort every other test in this package.
+		gt.NoError(t, err).Required()
+		gt.V(t, resp).NotNil().Required()
 
 		// Export and verify trace
 		trace := strategy.ExportTrace()
-		gt.NotNil(t, trace)
+		gt.V(t, trace).NotNil().Required()
 
 		// Verify response exists
 		gt.N(t, len(resp.Texts)).Greater(0)

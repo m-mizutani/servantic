@@ -160,3 +160,40 @@ func TestClaudeMessageRoundTrip(t *testing.T) {
 		gt.NotNil(t, content.Meta)
 	})
 }
+
+func TestToolResponsesInSeparateMessagesBecomeOneMessage(t *testing.T) {
+	text, err := gollem.NewTextContent("go")
+	gt.NoError(t, err)
+	call1, err := gollem.NewToolCallContent("c1", "alpha", map[string]any{"x": 1})
+	gt.NoError(t, err)
+	call2, err := gollem.NewToolCallContent("c2", "beta", map[string]any{"y": 2})
+	gt.NoError(t, err)
+	resp1, err := gollem.NewToolResponseContent("c1", "alpha", map[string]any{"ok": true}, false)
+	gt.NoError(t, err)
+	resp2, err := gollem.NewToolResponseContent("c2", "beta", map[string]any{"ok": true}, false)
+	gt.NoError(t, err)
+
+	history := &gollem.History{
+		LLType:  gollem.LLMTypeClaude,
+		Version: gollem.HistoryVersion,
+		Messages: []gollem.Message{
+			{Role: gollem.RoleUser, Contents: []gollem.MessageContent{text}},
+			{Role: gollem.RoleAssistant, Contents: []gollem.MessageContent{call1, call2}},
+			// A runtime that runs the calls one at a time appends one message per result.
+			{Role: gollem.RoleTool, Contents: []gollem.MessageContent{resp1}},
+			{Role: gollem.RoleTool, Contents: []gollem.MessageContent{resp2}},
+		},
+	}
+
+	messages, err := claude.ToMessages(history)
+	gt.NoError(t, err)
+
+	// Claude requires one tool_result for each tool_use block, all in the next user message.
+	gt.Equal(t, 3, len(messages))
+	gt.Equal(t, anthropic.MessageParamRoleUser, messages[2].Role)
+	gt.Equal(t, 2, len(messages[2].Content))
+	gt.NotNil(t, messages[2].Content[0].OfToolResult)
+	gt.Value(t, messages[2].Content[0].OfToolResult.ToolUseID).Equal("c1")
+	gt.NotNil(t, messages[2].Content[1].OfToolResult)
+	gt.Value(t, messages[2].Content[1].OfToolResult.ToolUseID).Equal("c2")
+}

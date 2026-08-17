@@ -1,0 +1,110 @@
+package convert_test
+
+import (
+	"testing"
+
+	"github.com/gollem-dev/gollem"
+	"github.com/gollem-dev/gollem/internal/convert"
+	"github.com/m-mizutani/gt"
+)
+
+func TestMergeConsecutiveToolMessages(t *testing.T) {
+	newText := func(t *testing.T, text string) gollem.MessageContent {
+		t.Helper()
+		c, err := gollem.NewTextContent(text)
+		gt.NoError(t, err)
+		return c
+	}
+	newToolResponse := func(t *testing.T, id, name string) gollem.MessageContent {
+		t.Helper()
+		c, err := gollem.NewToolResponseContent(id, name, map[string]any{"ok": true}, false)
+		gt.NoError(t, err)
+		return c
+	}
+
+	t.Run("merges a run of consecutive tool messages into one", func(t *testing.T) {
+		resp1 := newToolResponse(t, "c1", "alpha")
+		resp2 := newToolResponse(t, "c2", "beta")
+		messages := []gollem.Message{
+			{Role: gollem.RoleUser, Contents: []gollem.MessageContent{newText(t, "go")}},
+			{Role: gollem.RoleAssistant, Contents: []gollem.MessageContent{newText(t, "calling")}},
+			{Role: gollem.RoleTool, Contents: []gollem.MessageContent{resp1}},
+			{Role: gollem.RoleTool, Contents: []gollem.MessageContent{resp2}},
+		}
+
+		merged := convert.MergeConsecutiveToolMessages(messages)
+
+		gt.Equal(t, 3, len(merged))
+		gt.Equal(t, gollem.RoleTool, merged[2].Role)
+		gt.Equal(t, []gollem.MessageContent{resp1, resp2}, merged[2].Contents)
+	})
+
+	t.Run("keeps tool messages that answer different call turns separate", func(t *testing.T) {
+		messages := []gollem.Message{
+			{Role: gollem.RoleAssistant, Contents: []gollem.MessageContent{newText(t, "first call")}},
+			{Role: gollem.RoleTool, Contents: []gollem.MessageContent{newToolResponse(t, "c1", "alpha")}},
+			{Role: gollem.RoleAssistant, Contents: []gollem.MessageContent{newText(t, "second call")}},
+			{Role: gollem.RoleTool, Contents: []gollem.MessageContent{newToolResponse(t, "c2", "beta")}},
+		}
+
+		merged := convert.MergeConsecutiveToolMessages(messages)
+
+		gt.Equal(t, messages, merged)
+	})
+
+	t.Run("merges three or more consecutive tool messages", func(t *testing.T) {
+		messages := []gollem.Message{
+			{Role: gollem.RoleTool, Contents: []gollem.MessageContent{newToolResponse(t, "c1", "alpha")}},
+			{Role: gollem.RoleTool, Contents: []gollem.MessageContent{newToolResponse(t, "c2", "beta")}},
+			{Role: gollem.RoleTool, Contents: []gollem.MessageContent{newToolResponse(t, "c3", "gamma")}},
+			{Role: gollem.RoleUser, Contents: []gollem.MessageContent{newText(t, "next")}},
+		}
+
+		merged := convert.MergeConsecutiveToolMessages(messages)
+
+		gt.Equal(t, 2, len(merged))
+		gt.Equal(t, 3, len(merged[0].Contents))
+		gt.Equal(t, gollem.RoleUser, merged[1].Role)
+	})
+
+	t.Run("keeps the Name and Metadata of the first message of a run", func(t *testing.T) {
+		messages := []gollem.Message{
+			{
+				Role:     gollem.RoleTool,
+				Contents: []gollem.MessageContent{newToolResponse(t, "c1", "alpha")},
+				Name:     "alpha",
+				Metadata: map[string]any{"source": "first"},
+			},
+			{
+				Role:     gollem.RoleTool,
+				Contents: []gollem.MessageContent{newToolResponse(t, "c2", "beta")},
+				Name:     "beta",
+				Metadata: map[string]any{"source": "second"},
+			},
+		}
+
+		merged := convert.MergeConsecutiveToolMessages(messages)
+
+		gt.Equal(t, 1, len(merged))
+		gt.Equal(t, "alpha", merged[0].Name)
+		gt.Equal(t, map[string]any{"source": "first"}, merged[0].Metadata)
+	})
+
+	t.Run("does not modify the given messages", func(t *testing.T) {
+		messages := []gollem.Message{
+			{Role: gollem.RoleTool, Contents: []gollem.MessageContent{newToolResponse(t, "c1", "alpha")}},
+			{Role: gollem.RoleTool, Contents: []gollem.MessageContent{newToolResponse(t, "c2", "beta")}},
+		}
+
+		convert.MergeConsecutiveToolMessages(messages)
+
+		gt.Equal(t, 2, len(messages))
+		gt.Equal(t, 1, len(messages[0].Contents))
+		gt.Equal(t, 1, len(messages[1].Contents))
+	})
+
+	t.Run("returns empty input unchanged", func(t *testing.T) {
+		gt.Equal(t, 0, len(convert.MergeConsecutiveToolMessages(nil)))
+		gt.Equal(t, 0, len(convert.MergeConsecutiveToolMessages([]gollem.Message{})))
+	})
+}

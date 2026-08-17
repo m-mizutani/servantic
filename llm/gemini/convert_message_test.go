@@ -454,3 +454,39 @@ func TestFunctionCallIDBackwardCompatNoID(t *testing.T) {
 	gt.Value(t, restored[0].Parts[0].FunctionCall.ID).Equal("")
 	gt.Value(t, restored[1].Parts[0].FunctionResponse.ID).Equal("")
 }
+
+func TestToolResponsesInSeparateMessagesBecomeOneContent(t *testing.T) {
+	text, err := gollem.NewTextContent("go")
+	gt.NoError(t, err)
+	call1, err := gollem.NewToolCallContent("c1", "alpha", map[string]any{"x": 1})
+	gt.NoError(t, err)
+	call2, err := gollem.NewToolCallContent("c2", "beta", map[string]any{"y": 2})
+	gt.NoError(t, err)
+	resp1, err := gollem.NewToolResponseContent("c1", "alpha", map[string]any{"ok": true}, false)
+	gt.NoError(t, err)
+	resp2, err := gollem.NewToolResponseContent("c2", "beta", map[string]any{"ok": true}, false)
+	gt.NoError(t, err)
+
+	history := &gollem.History{
+		LLType:  gollem.LLMTypeGemini,
+		Version: gollem.HistoryVersion,
+		Messages: []gollem.Message{
+			{Role: gollem.RoleUser, Contents: []gollem.MessageContent{text}},
+			{Role: gollem.RoleAssistant, Contents: []gollem.MessageContent{call1, call2}},
+			// A runtime that runs the calls one at a time appends one message per result.
+			{Role: gollem.RoleTool, Contents: []gollem.MessageContent{resp1}},
+			{Role: gollem.RoleTool, Contents: []gollem.MessageContent{resp2}},
+		},
+	}
+
+	contents, err := gemini.ToContents(history)
+	gt.NoError(t, err)
+
+	// Gemini requires the answering turn to carry as many functionResponse parts as the
+	// call turn carried functionCall parts.
+	gt.Equal(t, 3, len(contents))
+	gt.Equal(t, "user", contents[2].Role)
+	gt.Equal(t, 2, len(contents[2].Parts))
+	gt.Value(t, contents[2].Parts[0].FunctionResponse.Name).Equal("alpha")
+	gt.Value(t, contents[2].Parts[1].FunctionResponse.Name).Equal("beta")
+}

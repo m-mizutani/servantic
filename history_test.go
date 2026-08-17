@@ -102,10 +102,10 @@ func TestOpenAIToClaudeConversion(t *testing.T) {
 					"unit":     "celsius",
 				}, "get_weather"),
 			),
+			// Claude requires every tool_result answering one assistant turn to be in a
+			// single user message, so the two OpenAI tool messages become one.
 			anthropic.NewUserMessage(
 				anthropic.NewToolResultBlock("call_123", `{"condition":"sunny","humidity":60,"temperature":25}`, false),
-			),
-			anthropic.NewUserMessage(
 				anthropic.NewToolResultBlock("call_456", `{"condition":"rainy","humidity":80,"temperature":15}`, false),
 			),
 			anthropic.NewAssistantMessage(anthropic.NewTextBlock("Tokyo is sunny at 25°C. London is rainy at 15°C.")),

@@ -269,6 +269,8 @@ func convertMessagesToGemini(messages []gollem.Message) ([]*genai.Content, error
 	// Gemini requires the number of functionResponse parts in a turn to match the number of
 	// functionCall parts in the turn it answers, so tool responses split across messages must
 	// be sent as one Content.
+	// https://ai.google.dev/gemini-api/docs/function-calling ("Parallel function calling")
+	// https://github.com/GoogleCloudPlatform/generative-ai/blob/main/gemini/function-calling/parallel_function_calling.ipynb
 	messages = convert.MergeConsecutiveToolMessages(messages)
 
 	result := make([]*genai.Content, 0, len(messages))

@@ -232,6 +232,7 @@ func convertMessagesToClaude(messages []gollem.Message) ([]anthropic.MessagePara
 
 	// Claude requires one tool_result for each tool_use block, all together in the next user
 	// message, so tool responses split across messages must be sent as one message.
+	// https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use
 	messages = convert.MergeConsecutiveToolMessages(messages)
 
 	result := make([]anthropic.MessageParam, 0, len(messages))

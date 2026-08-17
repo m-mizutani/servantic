@@ -131,6 +131,17 @@ func MergeSystemIntoFirstUser(messages []gollem.Message) []gollem.Message {
 // results per turn (Claude, Gemini): they require every result for one assistant turn to arrive
 // in the next single turn, and reject a request where the results are spread over several turns.
 //
+//	Claude: "return one tool_result for each tool_use block, all together in the next user
+//	message."
+//	https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use
+//
+//	Gemini: rejects a mismatched turn with "Please ensure that the number of function response
+//	parts is equal to the number of function call parts of the function call turn."
+//	See the "Parallel function calling" section of
+//	https://ai.google.dev/gemini-api/docs/function-calling and Google's sample, which passes
+//	every result in one message:
+//	https://github.com/GoogleCloudPlatform/generative-ai/blob/main/gemini/function-calling/parallel_function_calling.ipynb
+//
 // Merging by run is safe because a new tool call cannot appear without an assistant message in
 // between, so consecutive tool messages always answer the same call turn. A call that has no
 // result still has none after merging, and the provider still rejects it.

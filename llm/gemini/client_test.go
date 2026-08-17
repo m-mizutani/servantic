@@ -447,8 +447,7 @@ func TestWithThinkingLevel(t *testing.T) {
 			gt.NotNil(t, generationConfig)
 			gt.NotNil(t, generationConfig.ThinkingConfig)
 			gt.Equal(t, tc.expectLevel, generationConfig.ThinkingConfig.ThinkingLevel)
-			// Vertex AI rejects requests that carry both fields; the option
-			// must clear the default-zero ThinkingBudget that gemini.New sets.
+			// Vertex AI rejects requests that carry both fields.
 			gt.Nil(t, generationConfig.ThinkingConfig.ThinkingBudget)
 		})
 	}
@@ -477,6 +476,488 @@ func TestWithThinkingLevel(t *testing.T) {
 		gt.Nil(t, cfg.ThinkingConfig.ThinkingBudget)
 		gt.Equal(t, genai.ThinkingLevelLow, cfg.ThinkingConfig.ThinkingLevel)
 	})
+}
+
+func TestDefaultThinkingConfig(t *testing.T) {
+	// No thinking configuration is sent by default, so each model applies its
+	// own default instead of a fixed level some models reject.
+	cfg := gemini.NewClient("test-project", "us-central1").GetGenerationConfig()
+	gt.Nil(t, cfg.ThinkingConfig)
+}
+
+func TestWithIncludeThoughts(t *testing.T) {
+	t.Run("enabled", func(t *testing.T) {
+		cfg := gemini.NewClient("test-project", "us-central1",
+			gemini.WithIncludeThoughts(true),
+		).GetGenerationConfig()
+		gt.Equal(t, true, cfg.ThinkingConfig.IncludeThoughts)
+	})
+
+	t.Run("survives thinking level option", func(t *testing.T) {
+		cfg := gemini.NewClient("test-project", "us-central1",
+			gemini.WithIncludeThoughts(true),
+			gemini.WithThinkingLevel(genai.ThinkingLevelHigh),
+		).GetGenerationConfig()
+
+		gt.Equal(t, true, cfg.ThinkingConfig.IncludeThoughts)
+		gt.Equal(t, genai.ThinkingLevelHigh, cfg.ThinkingConfig.ThinkingLevel)
+	})
+
+	t.Run("survives thinking budget option", func(t *testing.T) {
+		cfg := gemini.NewClient("test-project", "us-central1",
+			gemini.WithIncludeThoughts(true),
+			gemini.WithThinkingBudget(1000),
+		).GetGenerationConfig()
+
+		gt.Equal(t, true, cfg.ThinkingConfig.IncludeThoughts)
+		gt.NotNil(t, cfg.ThinkingConfig.ThinkingBudget)
+	})
+}
+
+func TestGeminiStreamForwardsError(t *testing.T) {
+	// A stream that fails must surface the error; ending with no output and no
+	// error is indistinguishable from a model that said nothing.
+	streamErr := errors.New("quota exceeded")
+	mock := &apiClientMock{
+		GenerateContentStreamFunc: func(ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) <-chan gemini.StreamResponse {
+			ch := make(chan gemini.StreamResponse, 1)
+			ch <- gemini.StreamResponse{Err: streamErr}
+			close(ch)
+			return ch
+		},
+	}
+
+	session, err := gemini.NewSessionWithAPIClient(mock, gollem.NewSessionConfig(), "gemini-3.5-flash")
+	gt.NoError(t, err)
+
+	ch, err := session.Stream(context.Background(), []gollem.Input{gollem.Text("hi")})
+	gt.NoError(t, err)
+
+	var received []*gollem.Response
+	for resp := range ch {
+		received = append(received, resp)
+	}
+	gt.A(t, received).Length(1).Required()
+	gt.Error(t, received[0].Error)
+	gt.S(t, received[0].Error.Error()).Contains("quota exceeded")
+}
+
+func TestGeminiStreamMergesTextAroundDroppedParts(t *testing.T) {
+	// A thought delta between two answer deltas is dropped from history, and
+	// the surrounding text must still end up as one part.
+	chunk := func(part *genai.Part) gemini.StreamResponse {
+		return gemini.StreamResponse{Resp: &genai.GenerateContentResponse{
+			Candidates: []*genai.Candidate{
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{part}}},
+			},
+		}}
+	}
+
+	mock := &apiClientMock{
+		GenerateContentStreamFunc: func(ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) <-chan gemini.StreamResponse {
+			ch := make(chan gemini.StreamResponse, 3)
+			ch <- chunk(&genai.Part{Text: "he"})
+			ch <- chunk(&genai.Part{Text: "reasoning", Thought: true})
+			ch <- chunk(&genai.Part{Text: "llo"})
+			close(ch)
+			return ch
+		},
+	}
+
+	session, err := gemini.NewSessionWithAPIClient(mock, gollem.NewSessionConfig(), "gemini-3.5-flash")
+	gt.NoError(t, err)
+
+	ch, err := session.Stream(context.Background(), []gollem.Input{gollem.Text("hi")})
+	gt.NoError(t, err)
+	for resp := range ch {
+		gt.NoError(t, resp.Error)
+	}
+
+	history, err := session.History()
+	gt.NoError(t, err)
+	gt.A(t, history.Messages).Length(2).Required()
+
+	assistant := history.Messages[1]
+	gt.Equal(t, gollem.RoleAssistant, assistant.Role)
+	gt.A(t, assistant.Contents).Length(1).Required()
+	text, err := assistant.Contents[0].GetTextContent()
+	gt.NoError(t, err)
+	gt.Equal(t, "hello", text.Text)
+}
+
+func TestGeminiStreamHistoryNeedsModelTurn(t *testing.T) {
+	// A stream that produces nothing storable must not leave a user turn
+	// without a model turn: the next request would then carry two consecutive
+	// user contents.
+	mock := &apiClientMock{
+		GenerateContentStreamFunc: func(ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) <-chan gemini.StreamResponse {
+			ch := make(chan gemini.StreamResponse, 1)
+			ch <- gemini.StreamResponse{Resp: &genai.GenerateContentResponse{
+				Candidates: []*genai.Candidate{
+					{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{}}}},
+				},
+			}}
+			close(ch)
+			return ch
+		},
+	}
+
+	session, err := gemini.NewSessionWithAPIClient(mock, gollem.NewSessionConfig(), "gemini-3.5-flash")
+	gt.NoError(t, err)
+
+	ch, err := session.Stream(context.Background(), []gollem.Input{gollem.Text("hi")})
+	gt.NoError(t, err)
+	for resp := range ch {
+		gt.NoError(t, resp.Error)
+	}
+
+	history, err := session.History()
+	gt.NoError(t, err)
+	gt.A(t, history.Messages).Length(0)
+}
+
+func TestNewHistoryContent(t *testing.T) {
+	t.Run("drops thought text but keeps its signature", func(t *testing.T) {
+		stored := gemini.NewHistoryContent(&genai.Content{
+			Role: "model",
+			Parts: []*genai.Part{
+				{Text: "internal reasoning", Thought: true, ThoughtSignature: []byte("sig")},
+				{Text: "answer"},
+			},
+		})
+		gt.Value(t, stored).NotNil().Required()
+		gt.A(t, stored.Parts).Length(2).Required()
+
+		gt.Equal(t, "", stored.Parts[0].Text)
+		gt.Equal(t, false, stored.Parts[0].Thought)
+		gt.Equal(t, []byte("sig"), stored.Parts[0].ThoughtSignature)
+		gt.Equal(t, "answer", stored.Parts[1].Text)
+	})
+
+	t.Run("drops a thought part without a signature", func(t *testing.T) {
+		stored := gemini.NewHistoryContent(&genai.Content{
+			Role: "model",
+			Parts: []*genai.Part{
+				{Text: "internal reasoning", Thought: true},
+				{Text: "answer"},
+			},
+		})
+		gt.Value(t, stored).NotNil().Required()
+		gt.A(t, stored.Parts).Length(1).Required()
+		gt.Equal(t, "answer", stored.Parts[0].Text)
+	})
+
+	t.Run("drops parts the conversion layer cannot represent", func(t *testing.T) {
+		stored := gemini.NewHistoryContent(&genai.Content{
+			Role: "model",
+			Parts: []*genai.Part{
+				{ExecutableCode: &genai.ExecutableCode{Code: "print(1)", Language: genai.LanguagePython}},
+				{CodeExecutionResult: &genai.CodeExecutionResult{Output: "1"}},
+				{Text: "answer"},
+			},
+		})
+		gt.Value(t, stored).NotNil().Required()
+		gt.A(t, stored.Parts).Length(1).Required()
+		gt.Equal(t, "answer", stored.Parts[0].Text)
+	})
+
+	t.Run("returns nil when nothing is storable", func(t *testing.T) {
+		stored := gemini.NewHistoryContent(&genai.Content{
+			Role:  "model",
+			Parts: []*genai.Part{{}, {Text: "reasoning", Thought: true}},
+		})
+		gt.Nil(t, stored)
+	})
+}
+
+func TestGeminiHistoryExcludesThoughtText(t *testing.T) {
+	// Thought summaries must not be re-sent on later turns: only the signature
+	// has to travel back.
+	resp := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+				{Text: "internal reasoning", Thought: true, ThoughtSignature: []byte("sig")},
+				{Text: "answer"},
+			}}},
+		},
+	}
+
+	var sentContents []*genai.Content
+	mock := &apiClientMock{
+		GenerateContentFunc: func(ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+			sentContents = contents
+			return resp, nil
+		},
+		GenerateContentStreamFunc: func(ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) <-chan gemini.StreamResponse {
+			ch := make(chan gemini.StreamResponse, 1)
+			ch <- gemini.StreamResponse{Resp: resp}
+			close(ch)
+			return ch
+		},
+	}
+
+	// Asserts what the turn following the first response carries back.
+	assertResentModelTurn := func(t *testing.T) {
+		var modelContent *genai.Content
+		for _, c := range sentContents {
+			if c.Role == "model" {
+				modelContent = c
+			}
+		}
+		gt.Value(t, modelContent).NotNil().Required()
+
+		for _, p := range modelContent.Parts {
+			gt.Equal(t, false, p.Thought)
+			gt.S(t, p.Text).NotContains("internal reasoning")
+		}
+		// The signature of the dropped thought part is still carried back.
+		gt.Equal(t, []byte("sig"), modelContent.Parts[0].ThoughtSignature)
+	}
+
+	t.Run("blocking", func(t *testing.T) {
+		sentContents = nil
+		session, err := gemini.NewSessionWithAPIClient(mock, gollem.NewSessionConfig(), "gemini-3.5-flash")
+		gt.NoError(t, err)
+
+		ctx := context.Background()
+		_, err = session.Generate(ctx, []gollem.Input{gollem.Text("hi")})
+		gt.NoError(t, err)
+		_, err = session.Generate(ctx, []gollem.Input{gollem.Text("again")})
+		gt.NoError(t, err)
+
+		assertResentModelTurn(t)
+	})
+
+	t.Run("streaming", func(t *testing.T) {
+		sentContents = nil
+		session, err := gemini.NewSessionWithAPIClient(mock, gollem.NewSessionConfig(), "gemini-3.5-flash")
+		gt.NoError(t, err)
+
+		ctx := context.Background()
+		ch, err := session.Stream(ctx, []gollem.Input{gollem.Text("hi")})
+		gt.NoError(t, err)
+		for r := range ch {
+			gt.NoError(t, r.Error)
+		}
+		_, err = session.Generate(ctx, []gollem.Input{gollem.Text("again")})
+		gt.NoError(t, err)
+
+		assertResentModelTurn(t)
+	})
+}
+
+func TestGeminiThoughtsPropagation(t *testing.T) {
+	makeResp := func() *genai.GenerateContentResponse {
+		return &genai.GenerateContentResponse{
+			Candidates: []*genai.Candidate{
+				{Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+					{Text: "reasoning summary", Thought: true},
+					{Text: "answer"},
+				}}},
+			},
+		}
+	}
+
+	t.Run("blocking", func(t *testing.T) {
+		mock := &apiClientMock{
+			GenerateContentFunc: func(ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+				return makeResp(), nil
+			},
+		}
+		session, err := gemini.NewSessionWithAPIClient(mock, gollem.NewSessionConfig(), "gemini-3.5-flash")
+		gt.NoError(t, err)
+
+		resp, err := session.Generate(context.Background(), []gollem.Input{gollem.Text("hi")})
+		gt.NoError(t, err)
+		gt.A(t, resp.Thoughts).Length(1)
+		gt.Equal(t, "reasoning summary", resp.Thoughts[0])
+		gt.A(t, resp.Texts).Length(1)
+		gt.Equal(t, "answer", resp.Texts[0])
+	})
+
+	t.Run("streaming", func(t *testing.T) {
+		mock := &apiClientMock{
+			GenerateContentStreamFunc: func(ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) <-chan gemini.StreamResponse {
+				ch := make(chan gemini.StreamResponse, 1)
+				ch <- gemini.StreamResponse{Resp: makeResp()}
+				close(ch)
+				return ch
+			},
+		}
+		session, err := gemini.NewSessionWithAPIClient(mock, gollem.NewSessionConfig(), "gemini-3.5-flash")
+		gt.NoError(t, err)
+
+		ch, err := session.Stream(context.Background(), []gollem.Input{gollem.Text("hi")})
+		gt.NoError(t, err)
+
+		var thoughts []string
+		for resp := range ch {
+			gt.NoError(t, resp.Error)
+			thoughts = append(thoughts, resp.Thoughts...)
+		}
+		gt.A(t, thoughts).Length(1)
+		gt.Equal(t, "reasoning summary", thoughts[0])
+	})
+}
+
+func TestGeminiStreamPreservesThoughtSignature(t *testing.T) {
+	// Gemini 3.x rejects a turn whose function call parts lost their
+	// thought_signature, so the streamed response must be stored in history
+	// exactly as it arrived and resent on the next turn.
+	chunk := func(parts ...*genai.Part) *genai.GenerateContentResponse {
+		return &genai.GenerateContentResponse{
+			Candidates: []*genai.Candidate{
+				{Content: &genai.Content{Role: "model", Parts: parts}},
+			},
+		}
+	}
+
+	var sentContents []*genai.Content
+	mock := &apiClientMock{
+		GenerateContentStreamFunc: func(ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) <-chan gemini.StreamResponse {
+			ch := make(chan gemini.StreamResponse, 3)
+			ch <- gemini.StreamResponse{Resp: chunk(&genai.Part{Text: "let me "})}
+			ch <- gemini.StreamResponse{Resp: chunk(&genai.Part{Text: "check"})}
+			ch <- gemini.StreamResponse{Resp: chunk(&genai.Part{
+				FunctionCall: &genai.FunctionCall{
+					ID:   "call-001",
+					Name: "get_weather",
+					Args: map[string]any{"city": "tokyo"},
+				},
+				ThoughtSignature: []byte("sig-abc"),
+			})}
+			close(ch)
+			return ch
+		},
+		GenerateContentFunc: func(ctx context.Context, model string, contents []*genai.Content, config *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+			sentContents = contents
+			return chunk(&genai.Part{Text: "done"}), nil
+		},
+	}
+
+	session, err := gemini.NewSessionWithAPIClient(mock, gollem.NewSessionConfig(), "gemini-3.5-flash")
+	gt.NoError(t, err)
+
+	ctx := context.Background()
+	ch, err := session.Stream(ctx, []gollem.Input{gollem.Text("weather?")})
+	gt.NoError(t, err)
+
+	var calls []*gollem.FunctionCall
+	for resp := range ch {
+		gt.NoError(t, resp.Error)
+		calls = append(calls, resp.FunctionCalls...)
+	}
+	gt.A(t, calls).Length(1).Required()
+	gt.Equal(t, "call-001", calls[0].ID)
+
+	// Next turn: the stored assistant content must still carry the signature.
+	_, err = session.Generate(ctx, []gollem.Input{gollem.FunctionResponse{
+		ID:   calls[0].ID,
+		Name: calls[0].Name,
+		Data: map[string]any{"temp": 20},
+	}})
+	gt.NoError(t, err)
+
+	var modelContent *genai.Content
+	for _, c := range sentContents {
+		if c.Role == "model" {
+			modelContent = c
+		}
+	}
+	gt.Value(t, modelContent).NotNil().Required()
+
+	var fcPart *genai.Part
+	for _, p := range modelContent.Parts {
+		if p.FunctionCall != nil {
+			fcPart = p
+		}
+	}
+	gt.Value(t, fcPart).NotNil().Required()
+	gt.Equal(t, []byte("sig-abc"), fcPart.ThoughtSignature)
+	gt.Equal(t, "call-001", fcPart.FunctionCall.ID)
+
+	// Text deltas are merged into a single part rather than kept per chunk.
+	textParts := 0
+	for _, p := range modelContent.Parts {
+		if p.FunctionCall == nil {
+			textParts++
+			gt.Equal(t, "let me check", p.Text)
+		}
+	}
+	gt.Equal(t, 1, textParts)
+}
+
+func TestMergeStreamedParts(t *testing.T) {
+	type testCase struct {
+		input    []*genai.Part
+		expected []*genai.Part
+	}
+
+	runTest := func(tc testCase) func(t *testing.T) {
+		return func(t *testing.T) {
+			actual := gemini.MergeStreamedParts(tc.input)
+			gt.A(t, actual).Length(len(tc.expected)).Required()
+			for i, want := range tc.expected {
+				gt.Equal(t, want.Text, actual[i].Text)
+				gt.Equal(t, want.Thought, actual[i].Thought)
+				gt.Equal(t, want.ThoughtSignature, actual[i].ThoughtSignature)
+				if want.FunctionCall == nil {
+					gt.Nil(t, actual[i].FunctionCall)
+				} else {
+					gt.Value(t, actual[i].FunctionCall).NotNil().Required()
+					gt.Equal(t, want.FunctionCall.Name, actual[i].FunctionCall.Name)
+				}
+			}
+		}
+	}
+
+	t.Run("merges consecutive text deltas", runTest(testCase{
+		input: []*genai.Part{
+			{Text: "he"},
+			{Text: "llo"},
+		},
+		expected: []*genai.Part{
+			{Text: "hello"},
+		},
+	}))
+
+	t.Run("keeps thought text separate from answer text", runTest(testCase{
+		input: []*genai.Part{
+			{Text: "think", Thought: true},
+			{Text: "ing", Thought: true},
+			{Text: "answer"},
+		},
+		expected: []*genai.Part{
+			{Text: "thinking", Thought: true},
+			{Text: "answer"},
+		},
+	}))
+
+	t.Run("never merges a part carrying a signature", runTest(testCase{
+		input: []*genai.Part{
+			{Text: "a"},
+			{Text: "b", ThoughtSignature: []byte("sig")},
+			{Text: "c"},
+		},
+		expected: []*genai.Part{
+			{Text: "a"},
+			{Text: "b", ThoughtSignature: []byte("sig")},
+			{Text: "c"},
+		},
+	}))
+
+	t.Run("passes function calls through", runTest(testCase{
+		input: []*genai.Part{
+			{Text: "calling"},
+			{FunctionCall: &genai.FunctionCall{Name: "tool_a"}, ThoughtSignature: []byte("sig")},
+			{FunctionCall: &genai.FunctionCall{Name: "tool_b"}},
+		},
+		expected: []*genai.Part{
+			{Text: "calling"},
+			{FunctionCall: &genai.FunctionCall{Name: "tool_a"}, ThoughtSignature: []byte("sig")},
+			{FunctionCall: &genai.FunctionCall{Name: "tool_b"}},
+		},
+	}))
 }
 
 func TestThinkingBudgetIntegration(t *testing.T) {
@@ -671,7 +1152,9 @@ func TestThinkingModelAgentLoop(t *testing.T) {
 			foundFCSig := false
 			for _, content := range contents {
 				for _, part := range content.Parts {
-					if part.Thought && len(part.ThoughtSignature) > 0 {
+					// The thought part is stored as its signature alone: the
+					// reasoning text does not have to travel back.
+					if string(part.ThoughtSignature) == "thought-sig-001" {
 						foundThoughtSig = true
 					}
 					if part.FunctionCall != nil && len(part.ThoughtSignature) > 0 {
@@ -781,7 +1264,9 @@ func TestThinkingModelHistoryRoundTrip(t *testing.T) {
 			foundTextSig := false
 			for _, content := range contents {
 				for _, part := range content.Parts {
-					if part.Thought && string(part.ThoughtSignature) == "sig-thought" {
+					// The thought part survives the round trip as its
+					// signature; its reasoning text is not resent.
+					if string(part.ThoughtSignature) == "sig-thought" {
 						foundThoughtSig = true
 					}
 					if !part.Thought && part.Text == "Hello!" && string(part.ThoughtSignature) == "sig-text" {

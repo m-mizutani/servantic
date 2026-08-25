@@ -2,6 +2,7 @@ package gollem
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"slices"
@@ -274,6 +275,15 @@ func (p *Parameter) ValidateValue(name string, value any) error {
 			n = float64(v)
 		case int64:
 			n = float64(v)
+		case json.Number:
+			// An argument too wide for float64 is decoded as json.Number to keep its exact
+			// value; the range check below is still done in float64, which is enough to
+			// compare against Minimum and Maximum.
+			f, err := v.Float64()
+			if err != nil {
+				return eb.Wrap(ErrInvalidParameter, "expected number type", goerr.V("actual", value))
+			}
+			n = f
 		default:
 			return eb.Wrap(ErrInvalidParameter, "expected number type", goerr.V("actual", value))
 		}
@@ -296,6 +306,17 @@ func (p *Parameter) ValidateValue(name string, value any) error {
 				return eb.Wrap(ErrInvalidParameter, "expected integer type, got float", goerr.V("actual", v))
 			}
 			n = int64(v)
+		case json.Number:
+			// An integer too wide for float64 is decoded as json.Number to keep its exact
+			// value, so it is parsed as an int64 rather than through float64. A literal
+			// that does not fit an int64 is out of range for this parameter; the parse
+			// error is kept so the reason is visible in the error chain.
+			i, err := v.Int64()
+			if err != nil {
+				return eb.Wrap(ErrInvalidParameter, "expected integer type",
+					goerr.V("actual", value), goerr.V("parse_error", err))
+			}
+			n = i
 		default:
 			return eb.Wrap(ErrInvalidParameter, "expected integer type", goerr.V("actual", value))
 		}

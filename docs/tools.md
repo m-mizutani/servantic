@@ -149,6 +149,38 @@ Each parameter specification includes:
 > [!CAUTION]
 > Note that not all parameters are supported by every LLM, as parameter support varies between different LLM providers.
 
+### Numbers in `args` and in tool results
+
+Numbers in the `args` map are `float64`, the type `encoding/json` produces. The one
+exception is an integer a `float64` cannot represent exactly — one wider than 53 bits, such
+as a large account ID or a nanosecond timestamp. Those arrive as `json.Number` so the value
+the model sent is not rounded on the way in, and so the value a tool returns is not rounded
+on the way back out.
+
+Every number that a `float64` represents exactly is still a `float64`, so `args["n"].(float64)`
+keeps working wherever it works today. A tool that accepts identifiers of that size should
+handle both:
+
+```go
+func toInt64(v any) (int64, bool) {
+    switch n := v.(type) {
+    case float64:
+        return int64(n), true
+    case json.Number:
+        i, err := n.Int64()
+        return i, err == nil
+    }
+    return 0, false
+}
+```
+
+> [!NOTE]
+> This holds for OpenAI and Claude. It does not hold for Gemini: `google.golang.org/genai`
+> rebuilds the whole request through `json.Marshal` followed by a plain `json.Unmarshal`
+> into `map[string]any` before sending it, so an integer wider than 53 bits is rounded
+> inside the SDK regardless of what gollem passes it. Pass such an identifier as a string
+> when the tool is used with Gemini.
+
 ## Using Tools
 
 To use tools with your agent:

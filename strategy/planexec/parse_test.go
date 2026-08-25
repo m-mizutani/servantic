@@ -189,3 +189,31 @@ func TestParseTaskResult(t *testing.T) {
 		expected: []string{"Executed query", "Tool calls executed", "query_tool", "result", "success"},
 	}))
 }
+
+// parseTaskResult writes its output into Task.Result, which buildPlanPrompt and
+// buildReflectPrompt embed verbatim. Ranging over FunctionCall.Arguments without sorting
+// made the same tool call render in a different order on every run.
+func TestParseTaskResultOrdersArgumentsByName(t *testing.T) {
+	response := &gollem.Response{
+		FunctionCalls: []*gollem.FunctionCall{
+			{
+				ID:   "call_1",
+				Name: "query_tool",
+				Arguments: map[string]any{
+					"zeta":  1,
+					"alpha": 2,
+					"mike":  3,
+					"bravo": 4,
+					"yank":  5,
+				},
+			},
+		},
+	}
+
+	first := planexec.ParseTaskResult(response, nil)
+	for range 50 {
+		gt.Equal(t, first, planexec.ParseTaskResult(response, nil))
+	}
+
+	gt.S(t, first).Contains("  alpha: 2\n\n  bravo: 4\n\n  mike: 3\n\n  yank: 5\n\n  zeta: 1")
+}

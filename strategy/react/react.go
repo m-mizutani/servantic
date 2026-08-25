@@ -182,21 +182,24 @@ func (s *Strategy) handleThoughtAndAction(ctx context.Context, state *gollem.Str
 // handleObservation handles the Observation phase
 func (s *Strategy) handleObservation(ctx context.Context, state *gollem.StrategyState) ([]gollem.Input, *gollem.ExecuteResponse, error) {
 	// Convert function responses to tool results
-	toolResults := convertFunctionResponsesToToolResults(state.NextInput)
+	toolResults, err := convertFunctionResponsesToToolResults(state.NextInput)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// Check for errors
 	hasError := false
-	var err error
+	var toolErr error
 	for _, result := range toolResults {
 		if !result.Success {
 			hasError = true
-			err = goerr.Wrap(fmt.Errorf("tool execution failed: %s", result.Error), fmt.Sprintf("tool %s error", result.ToolName))
+			toolErr = goerr.Wrap(fmt.Errorf("tool execution failed: %s", result.Error), fmt.Sprintf("tool %s error", result.ToolName))
 			break
 		}
 	}
 
 	// Record observation
-	s.recordObservation(toolResults, !hasError, err)
+	s.recordObservation(toolResults, !hasError, toolErr)
 
 	// Trace event: observation
 	if rec := trace.HandlerFrom(ctx); rec != nil {

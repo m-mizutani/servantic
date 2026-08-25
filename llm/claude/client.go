@@ -12,6 +12,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/gollem-dev/gollem"
+	"github.com/gollem-dev/gollem/internal/jsonutil"
 	"github.com/gollem-dev/gollem/internal/schema"
 	"github.com/gollem-dev/gollem/trace"
 	"github.com/m-mizutani/goerr/v2"
@@ -573,7 +574,14 @@ func generateClaudeStream(
 					response.OutputToken = totalOutputTokens
 					response.CacheCreationInputToken = totalCacheCreation
 					response.CacheReadInputToken = totalCacheRead
-					toolCalls = append(toolCalls, anthropic.NewToolUseBlock(funcCall.ID, funcCall.Arguments, funcCall.Name))
+					input, err := toolUseInput(funcCall.Arguments)
+					if err != nil {
+						response.Error = goerr.Wrap(err, "failed to encode tool call arguments",
+							goerr.V("tool", funcCall.Name))
+						responseChan <- response
+						return
+					}
+					toolCalls = append(toolCalls, anthropic.NewToolUseBlock(funcCall.ID, input, funcCall.Name))
 					acc = newFunctionCallAccumulator()
 				}
 			}
@@ -618,8 +626,8 @@ func processResponseWithContentType(ctx context.Context, resp *anthropic.Message
 			response.Texts = append(response.Texts, text)
 		case "tool_use":
 			toolUseBlock := content.AsToolUse()
-			var args map[string]any
-			if err := json.Unmarshal(toolUseBlock.Input, &args); err != nil {
+			args, err := jsonutil.DecodeObject(toolUseBlock.Input)
+			if err != nil {
 				response.Error = goerr.Wrap(err, "failed to unmarshal function arguments")
 				return response
 			}
@@ -933,9 +941,11 @@ func (a *FunctionCallAccumulator) accumulate() (*gollem.FunctionCall, error) {
 
 	var args map[string]any
 	if a.Arguments != "" {
-		if err := json.Unmarshal([]byte(a.Arguments), &args); err != nil {
+		decoded, err := jsonutil.DecodeObject([]byte(a.Arguments))
+		if err != nil {
 			return nil, goerr.Wrap(err, "failed to unmarshal function call arguments", goerr.V("accumulator", a))
 		}
+		args = decoded
 	}
 
 	return &gollem.FunctionCall{
@@ -1268,8 +1278,17 @@ func claudeMessagesToTraceMessages(messages []anthropic.MessageParam) []trace.Me
 			case block.OfText != nil:
 				blocks = append(blocks, trace.NewTextContent(block.OfText.Text))
 			case block.OfToolUse != nil:
+				// The input is a json.RawMessage for every block this package builds (see
+				// toolUseInput); a map only reaches here from a caller that assembled the
+				// message itself. Trace data is diagnostic, so a value that fits neither
+				// shape is recorded as no arguments rather than failing the request.
 				var args map[string]any
-				if input, ok := block.OfToolUse.Input.(map[string]any); ok {
+				switch input := block.OfToolUse.Input.(type) {
+				case json.RawMessage:
+					if decoded, err := jsonutil.DecodeObject(input); err == nil {
+						args = decoded
+					}
+				case map[string]any:
 					args = input
 				}
 				blocks = append(blocks, trace.NewToolCallContent(

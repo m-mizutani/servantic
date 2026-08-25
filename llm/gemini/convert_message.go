@@ -264,7 +264,10 @@ func convertMessagesToGemini(messages []gollem.Message) ([]*genai.Content, error
 	}
 
 	// Handle system messages by merging into first user message
-	messages = convert.MergeSystemIntoFirstUser(messages)
+	messages, err := convert.MergeSystemIntoFirstUser(messages)
+	if err != nil {
+		return nil, goerr.Wrap(err, "failed to merge system message into first user message")
+	}
 
 	// Gemini requires the number of functionResponse parts in a turn to match the number of
 	// functionCall parts in the turn it answers, so tool responses split across messages must

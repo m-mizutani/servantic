@@ -2,11 +2,11 @@ package openai
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"strings"
 
 	"github.com/gollem-dev/gollem"
 	"github.com/gollem-dev/gollem/internal/convert"
+	"github.com/gollem-dev/gollem/internal/jsonutil"
 	"github.com/m-mizutani/goerr/v2"
 	"github.com/sashabaranov/go-openai"
 )
@@ -155,8 +155,8 @@ func convertOpenAIMessage(msg openai.ChatCompletionMessage) (gollem.Message, err
 	// Handle tool responses (tool role messages)
 	if msg.Role == "tool" && msg.ToolCallID != "" {
 		// Parse content as response
-		var response map[string]interface{}
-		if err := json.Unmarshal([]byte(msg.Content), &response); err != nil {
+		response, err := jsonutil.DecodeObject([]byte(msg.Content))
+		if err != nil {
 			// If not JSON, wrap in a response object
 			response = map[string]interface{}{rawContentKey: msg.Content}
 		}
@@ -170,8 +170,8 @@ func convertOpenAIMessage(msg openai.ChatCompletionMessage) (gollem.Message, err
 	// Handle legacy function responses - convert to tool response
 	if msg.Role == "function" {
 		// Parse content as response
-		var response map[string]interface{}
-		if err := json.Unmarshal([]byte(msg.Content), &response); err != nil {
+		response, err := jsonutil.DecodeObject([]byte(msg.Content))
+		if err != nil {
 			// If not JSON, wrap in a response object
 			response = map[string]interface{}{rawContentKey: msg.Content}
 		}

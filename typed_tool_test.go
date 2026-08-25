@@ -2,6 +2,7 @@ package gollem_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -439,4 +440,28 @@ func TestNewToolWithMockLLM(t *testing.T) {
 		gt.Equal(t, float64(0), gotIn.A)
 		gt.Equal(t, float64(3), gotIn.B)
 	})
+}
+
+// A typed tool returning an int64 wider than float64 must reach the LLM with the value it
+// returned. toResultMap used to decode through a plain map[string]any, which rounded it.
+func TestTypedToolResultPreservesWideIntegers(t *testing.T) {
+	type lookupArgs struct {
+		Key string `json:"key" description:"Lookup key" required:"true"`
+	}
+	type lookupResult struct {
+		AccountID int64 `json:"account_id" description:"Account identifier"`
+	}
+
+	tool, err := gollem.NewTool("lookup", "Looks an account up",
+		func(_ context.Context, _ lookupArgs) (lookupResult, error) {
+			return lookupResult{AccountID: 9007199254740993}, nil
+		})
+	gt.NoError(t, err)
+
+	result, err := tool.Run(t.Context(), map[string]any{"key": "k"})
+	gt.NoError(t, err)
+
+	encoded, err := json.Marshal(result)
+	gt.NoError(t, err)
+	gt.Equal(t, `{"account_id":9007199254740993}`, string(encoded))
 }

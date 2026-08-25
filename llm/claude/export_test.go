@@ -17,6 +17,7 @@ var (
 	CacheTokensFromUsage          = cacheTokensFromUsage
 	NormalizeModelID              = normalizeModelID
 	ResolveMaxOutputTokens        = resolveMaxOutputTokens
+	ToolUseInput                  = toolUseInput
 )
 
 // FallbackMaxOutputTokens is the max tokens used for models absent from the table.

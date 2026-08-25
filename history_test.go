@@ -17,6 +17,19 @@ import (
 	"google.golang.org/genai"
 )
 
+// marshalClaudeMessages renders messages the way the Anthropic SDK sends them, so tests
+// compare what the API receives instead of the Go representation that produced it.
+func marshalClaudeMessages(t *testing.T, messages []anthropic.MessageParam) []string {
+	t.Helper()
+	out := make([]string, 0, len(messages))
+	for _, msg := range messages {
+		data, err := msg.MarshalJSON()
+		gt.NoError(t, err)
+		out = append(out, string(data))
+	}
+	return out
+}
+
 func TestOpenAIToClaudeConversion(t *testing.T) {
 	type testCase struct {
 		name             string
@@ -34,8 +47,10 @@ func TestOpenAIToClaudeConversion(t *testing.T) {
 			claudeMsgs, err := claude.ToMessages(historyFromOpenAI)
 			gt.NoError(t, err)
 
-			// Verify Claude messages
-			gt.Equal(t, tc.expectedMessages, claudeMsgs)
+			// Compare the wire form rather than the Go values. A tool_use input is carried
+			// as json.RawMessage so that the SDK encoder emits the arguments verbatim, so
+			// two message lists that produce the same request can differ as Go structs.
+			gt.Equal(t, marshalClaudeMessages(t, tc.expectedMessages), marshalClaudeMessages(t, claudeMsgs))
 		}
 	}
 
@@ -248,9 +263,11 @@ func TestClaudeToGeminiConversion(t *testing.T) {
 			{
 				Role: "user",
 				Parts: []*genai.Part{
-					// Claude now parses JSON, so result is properly structured
-					{FunctionResponse: &genai.FunctionResponse{ID: "toolu_123", Name: "", Response: map[string]any{"result": float64(8)}}},
-					{FunctionResponse: &genai.FunctionResponse{ID: "toolu_456", Name: "", Response: map[string]any{"result": float64(20)}}},
+					// Claude now parses JSON, so result is properly structured. The tool name is
+					// recovered from the tool_use block with the same ID, since a Claude
+					// tool_result carries none and Gemini requires one.
+					{FunctionResponse: &genai.FunctionResponse{ID: "toolu_123", Name: "calculate", Response: map[string]any{"result": float64(8)}}},
+					{FunctionResponse: &genai.FunctionResponse{ID: "toolu_456", Name: "calculate", Response: map[string]any{"result": float64(20)}}},
 				},
 			},
 			{Role: "model", Parts: []*genai.Part{{Text: "5+3 equals 8, and 10*2 equals 20."}}},
@@ -283,7 +300,7 @@ func TestClaudeToGeminiConversion(t *testing.T) {
 				Role: "user",
 				Parts: []*genai.Part{
 					// Claude parses JSON response
-					{FunctionResponse: &genai.FunctionResponse{ID: "toolu_789", Name: "", Response: map[string]any{"time": "14:30:00", "timezone": "UTC"}}},
+					{FunctionResponse: &genai.FunctionResponse{ID: "toolu_789", Name: "get_current_time", Response: map[string]any{"time": "14:30:00", "timezone": "UTC"}}},
 				},
 			},
 			{Role: "model", Parts: []*genai.Part{{Text: "It's currently 14:30 UTC."}}},
@@ -335,7 +352,7 @@ func TestClaudeToGeminiConversion(t *testing.T) {
 				Role: "user",
 				Parts: []*genai.Part{
 					// Error responses are also parsed as JSON
-					{FunctionResponse: &genai.FunctionResponse{ID: "toolu_error", Name: "", Response: map[string]any{"error": "City not found"}}},
+					{FunctionResponse: &genai.FunctionResponse{ID: "toolu_error", Name: "get_weather", Response: map[string]any{"error": "City not found"}}},
 				},
 			},
 			{Role: "model", Parts: []*genai.Part{{Text: "I couldn't find that city."}}},
@@ -525,7 +542,6 @@ func TestGeminiToOpenAIConversion(t *testing.T) {
 
 // Round-trip tests: A → B → A' should preserve A = A'
 // Note: Some fields may be lost during conversion due to provider limitations:
-// - OpenAI tool message Name field (Claude doesn't preserve it)
 // - Tool call IDs through Gemini (Gemini regenerates IDs)
 func TestOpenAIRoundTrip(t *testing.T) {
 	type testCase struct {
@@ -580,7 +596,9 @@ func TestOpenAIRoundTrip(t *testing.T) {
 				Role:       "tool",
 				Content:    `{"temperature":25}`,
 				ToolCallID: "call_123",
-				// Note: Name field will be lost (Claude doesn't preserve it)
+				// A Claude tool_result carries no tool name, so this used to come back empty.
+				// It is now recovered from the tool_use block with the same ID.
+				Name: "get_weather",
 			},
 			{Role: "assistant", Content: "It's 25°C in Tokyo."},
 		},
@@ -817,4 +835,71 @@ func TestClonePreservesContentMeta(t *testing.T) {
 	// Data was already copied; Meta must be too.
 	gt.Equal(t, original.Messages[0].Contents[0].Data, cloned.Messages[0].Contents[0].Data)
 	gt.Equal(t, original.Messages[0].Contents[0].Meta, cloned.Messages[0].Contents[0].Meta)
+}
+
+// Clone used to deep-copy Metadata through a JSON round-trip, which dropped it entirely on
+// an encoding failure and rewrote every number as a float64.
+func TestCloneMetadataIsIndependentAndKeepsValues(t *testing.T) {
+	original := &gollem.History{
+		LLType:  gollem.LLMTypeClaude,
+		Version: gollem.HistoryVersion,
+		Messages: []gollem.Message{
+			{
+				Role: gollem.RoleAssistant,
+				Metadata: map[string]any{
+					"account": int64(9007199254740993),
+					"nested":  map[string]any{"tags": []any{"a", "b"}},
+				},
+			},
+		},
+	}
+
+	cloned := original.Clone()
+
+	gt.Equal(t, int64(9007199254740993), gt.Cast[int64](t, cloned.Messages[0].Metadata["account"]))
+
+	// Mutating the clone must not reach the original.
+	clonedNested := gt.Cast[map[string]any](t, cloned.Messages[0].Metadata["nested"])
+	clonedTags := gt.Cast[[]any](t, clonedNested["tags"])
+	clonedTags[0] = "changed"
+	cloned.Messages[0].Metadata["account"] = int64(1)
+
+	originalNested := gt.Cast[map[string]any](t, original.Messages[0].Metadata["nested"])
+	originalTags := gt.Cast[[]any](t, originalNested["tags"])
+	gt.Equal(t, "a", gt.Cast[string](t, originalTags[0]))
+	gt.Equal(t, int64(9007199254740993), gt.Cast[int64](t, original.Messages[0].Metadata["account"]))
+}
+
+// Metadata is an exported map that callers fill with arbitrary Go values, not only the
+// map[string]any / []any shapes a JSON decode produces. Those values must be copied too,
+// or the clone shares storage with the original.
+func TestCloneMetadataCopiesNonJSONReferenceTypes(t *testing.T) {
+	labels := map[string]string{"env": "prod"}
+	tags := []string{"a", "b"}
+	counter := 7
+
+	original := &gollem.History{
+		LLType:  gollem.LLMTypeClaude,
+		Version: gollem.HistoryVersion,
+		Messages: []gollem.Message{
+			{
+				Role: gollem.RoleAssistant,
+				Metadata: map[string]any{
+					"tags":    tags,
+					"labels":  labels,
+					"counter": &counter,
+				},
+			},
+		},
+	}
+
+	cloned := original.Clone()
+
+	gt.Cast[[]string](t, cloned.Messages[0].Metadata["tags"])[0] = "changed"
+	gt.Cast[map[string]string](t, cloned.Messages[0].Metadata["labels"])["env"] = "dev"
+	*gt.Cast[*int](t, cloned.Messages[0].Metadata["counter"]) = 99
+
+	gt.Equal(t, "a", tags[0])
+	gt.Equal(t, "prod", labels["env"])
+	gt.Equal(t, 7, counter)
 }

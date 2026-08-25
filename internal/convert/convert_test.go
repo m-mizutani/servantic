@@ -30,7 +30,8 @@ func TestMergeSystemIntoFirstUser(t *testing.T) {
 			{Role: gollem.RoleUser, Contents: []gollem.MessageContent{newText(t, "again")}},
 		}
 
-		merged := convert.MergeSystemIntoFirstUser(messages)
+		merged, err := convert.MergeSystemIntoFirstUser(messages)
+		gt.NoError(t, err)
 
 		gt.Equal(t, 3, len(merged))
 		gt.Equal(t, gollem.RoleUser, merged[0].Role)
@@ -48,7 +49,8 @@ func TestMergeSystemIntoFirstUser(t *testing.T) {
 			{Role: gollem.RoleAssistant, Contents: []gollem.MessageContent{newText(t, "hi")}},
 		}
 
-		convert.MergeSystemIntoFirstUser(messages)
+		_, err := convert.MergeSystemIntoFirstUser(messages)
+		gt.NoError(t, err)
 
 		gt.Equal(t, 3, len(messages))
 		gt.Equal(t, gollem.RoleSystem, messages[0].Role)
@@ -63,7 +65,9 @@ func TestMergeSystemIntoFirstUser(t *testing.T) {
 			{Role: gollem.RoleUser, Contents: []gollem.MessageContent{newText(t, "hello")}},
 		}
 
-		gt.Equal(t, messages, convert.MergeSystemIntoFirstUser(messages))
+		merged, err := convert.MergeSystemIntoFirstUser(messages)
+		gt.NoError(t, err)
+		gt.Equal(t, messages, merged)
 	})
 
 	t.Run("drops a system message that carries no text", func(t *testing.T) {
@@ -74,11 +78,29 @@ func TestMergeSystemIntoFirstUser(t *testing.T) {
 			{Role: gollem.RoleUser, Contents: []gollem.MessageContent{newText(t, "hello")}},
 		}
 
-		merged := convert.MergeSystemIntoFirstUser(messages)
+		merged, err := convert.MergeSystemIntoFirstUser(messages)
+		gt.NoError(t, err)
 
 		gt.Equal(t, 1, len(merged))
 		gt.Equal(t, gollem.RoleUser, merged[0].Role)
 		gt.Equal(t, 1, len(merged[0].Contents))
+	})
+
+	// A decode failure used to be ignored, which sent the request without its system
+	// prompt instead of reporting that the history was unreadable.
+	t.Run("reports a system message whose text content cannot be decoded", func(t *testing.T) {
+		messages := []gollem.Message{
+			{
+				Role: gollem.RoleSystem,
+				Contents: []gollem.MessageContent{
+					{Type: gollem.MessageContentTypeText, Data: []byte(`{"text":`)},
+				},
+			},
+			{Role: gollem.RoleUser, Contents: []gollem.MessageContent{newText(t, "hello")}},
+		}
+
+		_, err := convert.MergeSystemIntoFirstUser(messages)
+		gt.Error(t, err)
 	})
 }
 

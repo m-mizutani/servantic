@@ -200,6 +200,49 @@ func TestObservationPhase(t *testing.T) {
 			t.Error("Expected result to have items")
 		}
 	})
+
+	// The encoded tool result becomes the observation the model reasons about. An encoding
+	// failure used to be ignored, leaving the observation empty instead of reporting it.
+	t.Run("reports a tool result that cannot be encoded", func(t *testing.T) {
+		mockClient := &mock.LLMClientMock{}
+		strategy := react.New(mockClient)
+
+		gt.NoError(t, strategy.Init(ctx, nil))
+
+		state0 := &gollem.StrategyState{
+			InitInput: []gollem.Input{gollem.Text("test")},
+			Iteration: 0,
+		}
+		_, _, _ = strategy.Handle(ctx, state0)
+
+		state1 := &gollem.StrategyState{
+			InitInput: []gollem.Input{gollem.Text("test")},
+			NextInput: []gollem.Input{},
+			Iteration: 1,
+			LastResponse: &gollem.Response{
+				FunctionCalls: []*gollem.FunctionCall{
+					{ID: "call-1", Name: "search"},
+				},
+			},
+		}
+		_, _, _ = strategy.Handle(ctx, state1)
+
+		state2 := &gollem.StrategyState{
+			InitInput: []gollem.Input{gollem.Text("test")},
+			NextInput: []gollem.Input{
+				gollem.FunctionResponse{
+					ID:   "call-1",
+					Name: "search",
+					// A channel cannot be encoded as JSON.
+					Data: map[string]any{"result": make(chan int)},
+				},
+			},
+			Iteration: 2,
+		}
+
+		_, _, err := strategy.Handle(ctx, state2)
+		gt.Error(t, err)
+	})
 }
 
 func TestToolExecutionError(t *testing.T) {

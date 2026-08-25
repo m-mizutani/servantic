@@ -187,3 +187,45 @@ func TestOpenAIMessageRoundTrip(t *testing.T) {
 	// so round-trip conversion will not preserve the original function format.
 	// This is expected behavior in v3.
 }
+
+// OpenAI carries tool arguments as a JSON string, so this pins the exact bytes the request
+// contains: an integer wider than float64 must not come back rounded.
+func TestOpenAIHistoryPreservesWideIntegers(t *testing.T) {
+	const wide = "9007199254740993"
+
+	messages := []openaiSDK.ChatCompletionMessage{
+		{
+			Role: "assistant",
+			ToolCalls: []openaiSDK.ToolCall{{
+				ID:       "call_1",
+				Type:     "function",
+				Function: openaiSDK.FunctionCall{Name: "lookup", Arguments: `{"id":` + wide + `}`},
+			}},
+		},
+		{Role: "tool", ToolCallID: "call_1", Name: "lookup", Content: `{"account":` + wide + `}`},
+	}
+
+	history, err := openai.NewHistory(messages)
+	gt.NoError(t, err)
+
+	restored, err := openai.ToMessages(history)
+	gt.NoError(t, err)
+
+	gt.Equal(t, `{"id":`+wide+`}`, restored[0].ToolCalls[0].Function.Arguments)
+	gt.Equal(t, `{"account":`+wide+`}`, restored[1].Content)
+}
+
+// A tool result that is a JSON object followed by prose is not a JSON object. It has to
+// fall back to being carried as raw text, not be truncated to the leading object.
+func TestOpenAIToolContentWithTrailingTextIsKeptWhole(t *testing.T) {
+	content := `{"ok":true} and a note about the result`
+
+	history, err := openai.NewHistory([]openaiSDK.ChatCompletionMessage{
+		{Role: "tool", ToolCallID: "call_1", Name: "check", Content: content},
+	})
+	gt.NoError(t, err)
+
+	resp, err := history.Messages[0].Contents[0].GetToolResponseContent()
+	gt.NoError(t, err)
+	gt.Equal(t, content, gt.Cast[string](t, resp.Response["content"]))
+}

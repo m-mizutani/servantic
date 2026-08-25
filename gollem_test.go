@@ -2,6 +2,7 @@ package gollem_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1819,4 +1820,58 @@ func TestToolOrderIsDeterministic(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		gt.Equal(t, first, execute(t))
 	}
+}
+
+// wideIntegerTool returns an identifier that a float64 cannot represent exactly.
+type wideIntegerTool struct{}
+
+func (t *wideIntegerTool) Spec() gollem.ToolSpec {
+	return gollem.ToolSpec{
+		Name:        "lookup_account",
+		Description: "Returns an account identifier",
+	}
+}
+
+func (t *wideIntegerTool) Run(ctx context.Context, args map[string]any) (map[string]any, error) {
+	return map[string]any{"account_id": int64(9007199254740993)}, nil
+}
+
+// The tool result is normalized through JSON before it is sent back to the model. That
+// normalization used to decode into a plain map[string]any, which rounded any integer
+// wider than 53 bits before the model ever saw it.
+func TestToolResultKeepsWideIntegerOnTheWayToTheLLM(t *testing.T) {
+	var observed []gollem.Input
+	callCount := 0
+
+	mockClient := &mock.LLMClientMock{
+		NewSessionFunc: func(_ context.Context, options ...gollem.SessionOption) (gollem.Session, error) {
+			return &mock.SessionMock{
+				GenerateFunc: func(_ context.Context, input []gollem.Input, _ ...gollem.GenerateOption) (*gollem.Response, error) {
+					callCount++
+					if callCount == 1 {
+						return &gollem.Response{
+							FunctionCalls: []*gollem.FunctionCall{
+								{ID: "call_1", Name: "lookup_account", Arguments: map[string]any{}},
+							},
+						}, nil
+					}
+					observed = input
+					return &gollem.Response{Texts: []string{"done"}}, nil
+				},
+			}, nil
+		},
+	}
+
+	agent := gollem.New(mockClient,
+		gollem.WithTools(&wideIntegerTool{}),
+		gollem.WithLoopLimit(5),
+	)
+	_, err := agent.Execute(t.Context(), gollem.Text("look it up"))
+	gt.NoError(t, err)
+
+	gt.A(t, observed).Length(1)
+	resp := gt.Cast[gollem.FunctionResponse](t, observed[0])
+	encoded, err := json.Marshal(resp.Data)
+	gt.NoError(t, err)
+	gt.Equal(t, `{"account_id":9007199254740993}`, string(encoded))
 }

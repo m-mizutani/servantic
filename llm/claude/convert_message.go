@@ -8,6 +8,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/gollem-dev/gollem"
 	"github.com/gollem-dev/gollem/internal/convert"
+	"github.com/gollem-dev/gollem/internal/jsonutil"
 	"github.com/m-mizutani/goerr/v2"
 )
 
@@ -51,13 +52,15 @@ func convertClaudeToMessages(messages []anthropic.MessageParam) ([]gollem.Messag
 		return []gollem.Message{}, nil
 	}
 
+	toolNamesByID := collectClaudeToolNames(messages)
+
 	result := make([]gollem.Message, 0, len(messages))
 
 	for _, msg := range messages {
 		contents := make([]gollem.MessageContent, 0, len(msg.Content))
 
 		for _, block := range msg.Content {
-			content, err := convertClaudeContentBlock(block)
+			content, err := convertClaudeContentBlock(block, toolNamesByID)
 			if err != nil {
 				// Skip unsupported content types (like empty text blocks)
 				if err == convert.ErrUnsupportedContentType {
@@ -82,8 +85,39 @@ func convertClaudeToMessages(messages []anthropic.MessageParam) ([]gollem.Messag
 	return result, nil
 }
 
-// convertClaudeContentBlock converts a single Claude content block to MessageContent
-func convertClaudeContentBlock(block anthropic.ContentBlockParamUnion) (gollem.MessageContent, error) {
+// toolUseInput encodes tool call arguments for anthropic.ToolUseBlockParam.Input.
+//
+// The arguments are encoded here rather than handed to the SDK as a map: the Anthropic
+// SDK's own JSON encoder writes a json.Number as a quoted string, which would change an
+// argument's type on the wire. A json.RawMessage implements json.Marshaler, so the SDK
+// emits these bytes verbatim. Every site that builds a tool_use block must use this, or
+// that site sends a wide integer argument as a string.
+func toolUseInput(args map[string]any) (json.RawMessage, error) {
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(raw), nil
+}
+
+// collectClaudeToolNames maps each tool_use ID to the tool name it called. Claude's
+// tool_result blocks reference a tool_use only by ID, so the name has to be recovered from
+// the whole message list rather than from the block being converted.
+func collectClaudeToolNames(messages []anthropic.MessageParam) map[string]string {
+	names := make(map[string]string)
+	for _, msg := range messages {
+		for _, block := range msg.Content {
+			if block.OfToolUse != nil && block.OfToolUse.ID != "" {
+				names[block.OfToolUse.ID] = block.OfToolUse.Name
+			}
+		}
+	}
+	return names
+}
+
+// convertClaudeContentBlock converts a single Claude content block to MessageContent.
+// toolNamesByID supplies the tool name for tool_result blocks, which do not carry one.
+func convertClaudeContentBlock(block anthropic.ContentBlockParamUnion, toolNamesByID map[string]string) (gollem.MessageContent, error) {
 	// Handle text blocks
 	if block.OfText != nil {
 		// Skip empty text blocks
@@ -136,9 +170,8 @@ func convertClaudeContentBlock(block anthropic.ContentBlockParamUnion) (gollem.M
 			// Decode the Base64 string to raw bytes
 			decodedData, err := base64.StdEncoding.DecodeString(block.OfImage.Source.OfBase64.Data)
 			if err != nil {
-				// If decoding fails, treat it as raw data
-				// This allows handling of both valid Base64 and raw strings
-				decodedData = []byte(block.OfImage.Source.OfBase64.Data)
+				return gollem.MessageContent{}, goerr.Wrap(err, "failed to decode base64 image data",
+					goerr.V("media_type", string(block.OfImage.Source.OfBase64.MediaType)))
 			}
 			return gollem.NewImageContent(
 				string(block.OfImage.Source.OfBase64.MediaType),
@@ -172,15 +205,36 @@ func convertClaudeContentBlock(block anthropic.ContentBlockParamUnion) (gollem.M
 		switch v := block.OfToolUse.Input.(type) {
 		case map[string]interface{}:
 			args = v
+		case json.RawMessage:
+			// The shape convertContentToClaude produces.
+			parsed, err := jsonutil.DecodeObject(v)
+			if err != nil {
+				return gollem.MessageContent{}, goerr.Wrap(err, "failed to decode tool use input",
+					goerr.V("tool", block.OfToolUse.Name))
+			}
+			args = parsed
 		case string:
-			// Try to parse as JSON
-			if err := json.Unmarshal([]byte(v), &args); err != nil {
+			// A tool_use input arriving as a string is the raw arguments JSON. When it does
+			// not parse, the string itself is the only thing left to carry, so keep it under
+			// "input" rather than losing the arguments entirely.
+			parsed, err := jsonutil.DecodeObject([]byte(v))
+			if err != nil {
 				args = map[string]interface{}{"input": v}
+			} else {
+				args = parsed
 			}
 		default:
 			// Convert to JSON then back to map
-			data, _ := json.Marshal(v)
-			_ = json.Unmarshal(data, &args)
+			data, err := json.Marshal(v)
+			if err != nil {
+				return gollem.MessageContent{}, goerr.Wrap(err, "failed to encode tool use input",
+					goerr.V("tool", block.OfToolUse.Name))
+			}
+			args, err = jsonutil.DecodeObject(data)
+			if err != nil {
+				return gollem.MessageContent{}, goerr.Wrap(err, "failed to decode tool use input",
+					goerr.V("tool", block.OfToolUse.Name))
+			}
 		}
 
 		return gollem.NewToolCallContent(
@@ -204,15 +258,18 @@ func convertClaudeContentBlock(block anthropic.ContentBlockParamUnion) (gollem.M
 		}
 
 		// Try to parse responseText as JSON to preserve structure
-		var response map[string]interface{}
-		if err := json.Unmarshal([]byte(responseText), &response); err != nil {
+		response, err := jsonutil.DecodeObject([]byte(responseText))
+		if err != nil {
 			// If not valid JSON, wrap in content field
 			response = map[string]interface{}{"content": responseText}
 		}
 
+		// A Claude tool_result block carries no tool name, but Gemini requires one on every
+		// functionResponse part. Recover it from the tool_use block with the same ID so a
+		// History produced by Claude can be replayed against another provider.
 		return gollem.NewToolResponseContent(
 			block.OfToolResult.ToolUseID,
-			"", // Claude doesn't include tool name in response
+			toolNamesByID[block.OfToolResult.ToolUseID],
 			response,
 			isError,
 		)
@@ -228,7 +285,10 @@ func convertMessagesToClaude(messages []gollem.Message) ([]anthropic.MessagePara
 	}
 
 	// Handle system messages by merging into first user message
-	messages = convert.MergeSystemIntoFirstUser(messages)
+	messages, err := convert.MergeSystemIntoFirstUser(messages)
+	if err != nil {
+		return nil, goerr.Wrap(err, "failed to merge system message into first user message")
+	}
 
 	// Claude requires one tool_result for each tool_use block, all together in the next user
 	// message, so tool responses split across messages must be sent as one message.
@@ -374,7 +434,12 @@ func convertContentToClaude(content gollem.MessageContent, messageRole gollem.Me
 		if err != nil {
 			return anthropic.ContentBlockParamUnion{}, err
 		}
-		return anthropic.NewToolUseBlock(toolCall.ID, toolCall.Arguments, toolCall.Name), nil
+		input, err := toolUseInput(toolCall.Arguments)
+		if err != nil {
+			return anthropic.ContentBlockParamUnion{}, goerr.Wrap(err, "failed to encode tool call arguments",
+				goerr.V("tool", toolCall.Name))
+		}
+		return anthropic.NewToolUseBlock(toolCall.ID, input, toolCall.Name), nil
 
 	case gollem.MessageContentTypeToolResponse:
 		toolResp, err := content.GetToolResponseContent()
@@ -387,7 +452,11 @@ func convertContentToClaude(content gollem.MessageContent, messageRole gollem.Me
 			contentStr = c
 		} else {
 			// Try to JSON stringify the response
-			data, _ := json.Marshal(toolResp.Response)
+			data, err := json.Marshal(toolResp.Response)
+			if err != nil {
+				return anthropic.ContentBlockParamUnion{}, goerr.Wrap(err, "failed to encode tool response",
+					goerr.V("tool_call_id", toolResp.ToolCallID))
+			}
 			contentStr = string(data)
 		}
 

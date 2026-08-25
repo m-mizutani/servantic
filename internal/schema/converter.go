@@ -1,10 +1,10 @@
 package schema
 
 import (
-	"encoding/json"
 	"slices"
 
 	"github.com/gollem-dev/gollem"
+	"github.com/gollem-dev/gollem/internal/jsonutil"
 	"github.com/m-mizutani/goerr/v2"
 )
 
@@ -113,8 +113,10 @@ func ConvertParameterToJSONString(param *gollem.Parameter) (string, error) {
 		schemaObj[k] = v
 	}
 
-	// Marshal to pretty JSON
-	schemaJSON, err := json.MarshalIndent(schemaObj, "", "  ")
+	// Marshal to pretty JSON. HTML escaping is disabled because this string is embedded
+	// verbatim into the system prompt: with it on, a description containing "<", ">" or "&"
+	// reaches the model as a unicode escape sequence instead of the character itself.
+	schemaJSON, err := jsonutil.MarshalIndentNoEscape(schemaObj, "", "  ")
 	if err != nil {
 		return "", goerr.Wrap(err, "failed to marshal schema")
 	}

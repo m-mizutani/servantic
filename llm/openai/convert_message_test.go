@@ -214,3 +214,18 @@ func TestOpenAIHistoryPreservesWideIntegers(t *testing.T) {
 	gt.Equal(t, `{"id":`+wide+`}`, restored[0].ToolCalls[0].Function.Arguments)
 	gt.Equal(t, `{"account":`+wide+`}`, restored[1].Content)
 }
+
+// A tool result that is a JSON object followed by prose is not a JSON object. It has to
+// fall back to being carried as raw text, not be truncated to the leading object.
+func TestOpenAIToolContentWithTrailingTextIsKeptWhole(t *testing.T) {
+	content := `{"ok":true} and a note about the result`
+
+	history, err := openai.NewHistory([]openaiSDK.ChatCompletionMessage{
+		{Role: "tool", ToolCallID: "call_1", Name: "check", Content: content},
+	})
+	gt.NoError(t, err)
+
+	resp, err := history.Messages[0].Contents[0].GetToolResponseContent()
+	gt.NoError(t, err)
+	gt.Equal(t, content, gt.Cast[string](t, resp.Response["content"]))
+}

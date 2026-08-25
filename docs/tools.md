@@ -174,6 +174,13 @@ func toInt64(v any) (int64, bool) {
 }
 ```
 
+> [!NOTE]
+> This holds for OpenAI and Claude. It does not hold for Gemini: `google.golang.org/genai`
+> rebuilds the whole request through `json.Marshal` followed by a plain `json.Unmarshal`
+> into `map[string]any` before sending it, so an integer wider than 53 bits is rounded
+> inside the SDK regardless of what gollem passes it. Pass such an identifier as a string
+> when the tool is used with Gemini.
+
 ## Using Tools
 
 To use tools with your agent:

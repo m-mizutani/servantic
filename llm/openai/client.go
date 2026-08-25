@@ -1233,7 +1233,6 @@ func tokenLimitErrorOptions(err error) []goerr.Option {
 	return nil
 }
 
-// openaiMessagesToTraceMessages converts OpenAI messages to trace messages.
 // traceArguments decodes a function call's arguments for trace output. Trace data is
 // diagnostic and must never fail the request that produced it, so arguments that do not
 // parse as a JSON object are recorded verbatim under "arguments" rather than dropped.
@@ -1248,6 +1247,7 @@ func traceArguments(arguments string) map[string]any {
 	return args
 }
 
+// openaiMessagesToTraceMessages converts OpenAI messages to trace messages.
 func openaiMessagesToTraceMessages(messages []openai.ChatCompletionMessage) []trace.Message {
 	var result []trace.Message
 	for _, msg := range messages {

@@ -308,10 +308,13 @@ func (p *Parameter) ValidateValue(name string, value any) error {
 			n = int64(v)
 		case json.Number:
 			// An integer too wide for float64 is decoded as json.Number to keep its exact
-			// value, so it is parsed as an int64 rather than through float64.
+			// value, so it is parsed as an int64 rather than through float64. A literal
+			// that does not fit an int64 is out of range for this parameter; the parse
+			// error is kept so the reason is visible in the error chain.
 			i, err := v.Int64()
 			if err != nil {
-				return eb.Wrap(ErrInvalidParameter, "expected integer type", goerr.V("actual", value))
+				return eb.Wrap(ErrInvalidParameter, "expected integer type",
+					goerr.V("actual", value), goerr.V("parse_error", err))
 			}
 			n = i
 		default:

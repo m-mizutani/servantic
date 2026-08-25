@@ -85,6 +85,21 @@ func convertClaudeToMessages(messages []anthropic.MessageParam) ([]gollem.Messag
 	return result, nil
 }
 
+// toolUseInput encodes tool call arguments for anthropic.ToolUseBlockParam.Input.
+//
+// The arguments are encoded here rather than handed to the SDK as a map: the Anthropic
+// SDK's own JSON encoder writes a json.Number as a quoted string, which would change an
+// argument's type on the wire. A json.RawMessage implements json.Marshaler, so the SDK
+// emits these bytes verbatim. Every site that builds a tool_use block must use this, or
+// that site sends a wide integer argument as a string.
+func toolUseInput(args map[string]any) (json.RawMessage, error) {
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(raw), nil
+}
+
 // collectClaudeToolNames maps each tool_use ID to the tool name it called. Claude's
 // tool_result blocks reference a tool_use only by ID, so the name has to be recovered from
 // the whole message list rather than from the block being converted.
@@ -419,16 +434,12 @@ func convertContentToClaude(content gollem.MessageContent, messageRole gollem.Me
 		if err != nil {
 			return anthropic.ContentBlockParamUnion{}, err
 		}
-		// The arguments are encoded here rather than handed to the SDK as a map: the
-		// Anthropic SDK's own JSON encoder writes a json.Number as a quoted string, which
-		// would change an argument's type on the wire. A json.RawMessage implements
-		// json.Marshaler, so the SDK emits these bytes verbatim.
-		rawArgs, err := json.Marshal(toolCall.Arguments)
+		input, err := toolUseInput(toolCall.Arguments)
 		if err != nil {
 			return anthropic.ContentBlockParamUnion{}, goerr.Wrap(err, "failed to encode tool call arguments",
 				goerr.V("tool", toolCall.Name))
 		}
-		return anthropic.NewToolUseBlock(toolCall.ID, json.RawMessage(rawArgs), toolCall.Name), nil
+		return anthropic.NewToolUseBlock(toolCall.ID, input, toolCall.Name), nil
 
 	case gollem.MessageContentTypeToolResponse:
 		toolResp, err := content.GetToolResponseContent()

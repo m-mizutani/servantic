@@ -330,3 +330,38 @@ func TestClaudeHistoryPreservesWideIntegers(t *testing.T) {
 	gt.NoError(t, err)
 	gt.S(t, string(wire)).Contains(`"id":` + wide)
 }
+
+// Every site that builds a tool_use block must encode the arguments the same way. Handing
+// the SDK a map instead makes its encoder write a json.Number as a quoted string, so a
+// wide integer argument would leave the streaming path as a string while the history path
+// sent a number.
+func TestToolUseInputSendsNumbersAsNumbers(t *testing.T) {
+	const wide = "9007199254740993"
+
+	input, err := claude.ToolUseInput(map[string]any{"id": json.Number(wide)})
+	gt.NoError(t, err)
+
+	msg := anthropic.NewAssistantMessage(anthropic.NewToolUseBlock("call_1", input, "lookup"))
+	wire, err := msg.MarshalJSON()
+	gt.NoError(t, err)
+	gt.S(t, string(wire)).Contains(`"id":` + wide)
+	gt.S(t, string(wire)).NotContains(`"id":"` + wide)
+}
+
+// The trace handler reads tool_use arguments back out of the request blocks. Those blocks
+// now carry json.RawMessage, so a type assertion for a map alone would trace every
+// history-replayed tool call with no arguments at all.
+func TestTraceMessagesReadRawToolUseInput(t *testing.T) {
+	input, err := claude.ToolUseInput(map[string]any{"city": "Tokyo"})
+	gt.NoError(t, err)
+
+	messages := []anthropic.MessageParam{
+		anthropic.NewAssistantMessage(anthropic.NewToolUseBlock("call_1", input, "get_weather")),
+	}
+
+	traced := claude.ClaudeMessagesToTraceMessages(messages)
+	gt.A(t, traced).Length(1)
+	gt.A(t, traced[0].Contents).Length(1)
+	gt.Equal(t, "get_weather", traced[0].Contents[0].Name)
+	gt.Equal(t, "Tokyo", gt.Cast[string](t, traced[0].Contents[0].Arguments["city"]))
+}

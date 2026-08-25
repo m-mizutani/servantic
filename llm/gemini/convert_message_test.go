@@ -528,9 +528,14 @@ func TestToolResponsesInSeparateMessagesBecomeOneContent(t *testing.T) {
 	gt.Value(t, contents[2].Parts[1].FunctionResponse.Name).Equal("beta")
 }
 
-// A tool argument wider than float64 must reach the Gemini request with the value the
-// model sent. The genai SDK encodes the request with encoding/json, so the check is made
-// on the same encoder that builds the request body.
+// This package's own conversion carries an integer wider than float64 through unchanged.
+//
+// It does not survive the request, and cannot be made to from here: genai's
+// Models.generateContent passes the whole request through InternalDeepMarshal
+// (common.go:371-378 in v1.53.0), which is json.Marshal followed by a plain json.Unmarshal
+// into map[string]any, so every number becomes a float64 before the body is built. The
+// inbound direction has the same shape. The test therefore pins the boundary this package
+// controls; the Gemini limitation is recorded in docs/tools.md.
 func TestGeminiHistoryPreservesWideIntegers(t *testing.T) {
 	const wide = "9007199254740993"
 

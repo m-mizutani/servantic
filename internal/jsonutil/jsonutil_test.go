@@ -100,6 +100,52 @@ func TestDecodeObjectRejectsNonObject(t *testing.T) {
 	gt.Error(t, err)
 }
 
+// json.Decoder reads one value and ignores the rest, where json.Unmarshal reports it.
+// Callers depend on the rejection: a tool result that is an object followed by prose has
+// to fall back to being carried as raw text instead of being truncated to the object.
+func TestDecodeObjectRejectsTrailingData(t *testing.T) {
+	_, err := jsonutil.DecodeObject([]byte(`{"a":1} and then some prose`))
+	gt.Error(t, err)
+}
+
+// A []byte field is a slice of uint8 and can never hold a json.Number, so the walk must
+// not descend into it. This pins the behaviour; the cost shows up on image and PDF
+// content, whose Data field is megabytes of []byte.
+func TestDecodeSkipsByteSlices(t *testing.T) {
+	type payload struct {
+		Data []byte         `json:"data"`
+		Meta map[string]any `json:"meta"`
+	}
+
+	var p payload
+	gt.NoError(t, jsonutil.Decode([]byte(`{"data":"aGVsbG8=","meta":{"id":9007199254740993}}`), &p))
+
+	gt.Equal(t, "hello", string(p.Data))
+	encoded, err := json.Marshal(p.Meta)
+	gt.NoError(t, err)
+	gt.Equal(t, `{"id":9007199254740993}`, string(encoded))
+}
+
+func BenchmarkDecodeLargeByteSlice(b *testing.B) {
+	type payload struct {
+		Data []byte `json:"data"`
+	}
+
+	blob := make([]byte, 1<<20)
+	raw, err := json.Marshal(payload{Data: blob})
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.ResetTimer()
+	for b.Loop() {
+		var p payload
+		if err := jsonutil.Decode(raw, &p); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func TestMarshalIndentNoEscape(t *testing.T) {
 	out, err := jsonutil.MarshalIndentNoEscape(map[string]any{"description": "a<b && c>d"}, "", "  ")
 	gt.NoError(t, err)

@@ -20,6 +20,9 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
+
+	"github.com/m-mizutani/goerr/v2"
 )
 
 // DecodeObject decodes a JSON object into a map, preserving numbers that a float64
@@ -41,11 +44,74 @@ func Decode(data []byte, v any) error {
 	if err := dec.Decode(v); err != nil {
 		return err
 	}
+	// Decoder.Decode reads one value and ignores whatever follows, where json.Unmarshal
+	// reports it. Callers rely on that rejection: a tool result that is a JSON object
+	// followed by prose must fall back to being carried as raw text, not be silently
+	// truncated to its first object.
+	if dec.More() {
+		return goerr.New("unexpected data after top-level JSON value")
+	}
 	normalizeInPlace(v)
 	return nil
 }
 
 var numberType = reflect.TypeOf(json.Number(""))
+
+var (
+	canHoldNumberCacheMu sync.RWMutex
+	canHoldNumberCache   = map[reflect.Type]bool{}
+)
+
+// canHoldNumber reports whether a value of type t could contain a json.Number anywhere
+// inside it. Only an interface-typed field can hold one, so a type with no interface in
+// its shape needs no walk at all. Without this check the walk descends into every element
+// of a []byte, which makes decoding an image or a PDF attachment cost one reflect call per
+// byte.
+func canHoldNumber(t reflect.Type) bool {
+	canHoldNumberCacheMu.RLock()
+	cached, ok := canHoldNumberCache[t]
+	canHoldNumberCacheMu.RUnlock()
+	if ok {
+		return cached
+	}
+
+	result := computeCanHoldNumber(t, map[reflect.Type]bool{})
+
+	canHoldNumberCacheMu.Lock()
+	canHoldNumberCache[t] = result
+	canHoldNumberCacheMu.Unlock()
+	return result
+}
+
+// computeCanHoldNumber walks the type graph. visiting guards against a recursive type,
+// whose cycle cannot introduce an interface that the rest of the walk does not already see.
+func computeCanHoldNumber(t reflect.Type, visiting map[reflect.Type]bool) bool {
+	if t == numberType || t.Kind() == reflect.Interface {
+		return true
+	}
+	if visiting[t] {
+		return false
+	}
+	visiting[t] = true
+	defer delete(visiting, t)
+
+	switch t.Kind() {
+	case reflect.Pointer, reflect.Slice, reflect.Array:
+		return computeCanHoldNumber(t.Elem(), visiting)
+	case reflect.Map:
+		return computeCanHoldNumber(t.Elem(), visiting)
+	case reflect.Struct:
+		for i := 0; i < t.NumField(); i++ {
+			if !t.Field(i).IsExported() {
+				continue
+			}
+			if computeCanHoldNumber(t.Field(i).Type, visiting) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // normalizeInPlace rewrites every json.Number reachable from v that a float64 represents
 // exactly. UseNumber only produces json.Number where the destination is an interface
@@ -57,6 +123,10 @@ func normalizeInPlace(v any) {
 }
 
 func normalizeReflect(v reflect.Value) {
+	if !v.IsValid() || !canHoldNumber(v.Type()) {
+		return
+	}
+
 	switch v.Kind() {
 	case reflect.Pointer:
 		if !v.IsNil() {

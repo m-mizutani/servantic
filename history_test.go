@@ -869,3 +869,37 @@ func TestCloneMetadataIsIndependentAndKeepsValues(t *testing.T) {
 	gt.Equal(t, "a", gt.Cast[string](t, originalTags[0]))
 	gt.Equal(t, int64(9007199254740993), gt.Cast[int64](t, original.Messages[0].Metadata["account"]))
 }
+
+// Metadata is an exported map that callers fill with arbitrary Go values, not only the
+// map[string]any / []any shapes a JSON decode produces. Those values must be copied too,
+// or the clone shares storage with the original.
+func TestCloneMetadataCopiesNonJSONReferenceTypes(t *testing.T) {
+	labels := map[string]string{"env": "prod"}
+	tags := []string{"a", "b"}
+	counter := 7
+
+	original := &gollem.History{
+		LLType:  gollem.LLMTypeClaude,
+		Version: gollem.HistoryVersion,
+		Messages: []gollem.Message{
+			{
+				Role: gollem.RoleAssistant,
+				Metadata: map[string]any{
+					"tags":    tags,
+					"labels":  labels,
+					"counter": &counter,
+				},
+			},
+		},
+	}
+
+	cloned := original.Clone()
+
+	gt.Cast[[]string](t, cloned.Messages[0].Metadata["tags"])[0] = "changed"
+	gt.Cast[map[string]string](t, cloned.Messages[0].Metadata["labels"])["env"] = "dev"
+	*gt.Cast[*int](t, cloned.Messages[0].Metadata["counter"]) = 99
+
+	gt.Equal(t, "a", tags[0])
+	gt.Equal(t, "prod", labels["env"])
+	gt.Equal(t, 7, counter)
+}

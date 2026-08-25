@@ -4,6 +4,7 @@ package gollem
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 
 	"github.com/m-mizutani/goerr/v2"
 )
@@ -116,8 +117,10 @@ func cloneMessage(m Message) Message {
 	return clone
 }
 
-// cloneAnyMap returns a deep copy of a decoded-JSON-shaped map. Maps and slices are copied
-// recursively; every other value is immutable once decoded and is copied by assignment.
+// cloneAnyMap returns a deep copy of m. Metadata is an exported map that callers fill with
+// arbitrary Go values, not only values decoded from JSON, so the copy cannot assume the
+// map[string]any / []any shapes: a []string or a map[string]string must be copied too, or
+// the clone shares storage with the original.
 func cloneAnyMap(m map[string]any) map[string]any {
 	clone := make(map[string]any, len(m))
 	for k, v := range m {
@@ -127,16 +130,67 @@ func cloneAnyMap(m map[string]any) map[string]any {
 }
 
 func cloneAnyValue(v any) any {
-	switch val := v.(type) {
-	case map[string]any:
-		return cloneAnyMap(val)
-	case []any:
-		items := make([]any, len(val))
-		for i, item := range val {
-			items[i] = cloneAnyValue(item)
+	if v == nil {
+		return nil
+	}
+	cloned := cloneReflect(reflect.ValueOf(v))
+	if !cloned.IsValid() {
+		return nil
+	}
+	return cloned.Interface()
+}
+
+// cloneReflect deep-copies the reference types a value can be built from. A pointer is
+// followed so the clone does not alias the original's target. Channels and funcs have no
+// meaningful copy and are carried over as-is, and so is a struct: its unexported fields
+// cannot be set through reflection, and copying only the exported half would produce a
+// value that is neither a real copy nor a plain assignment.
+func cloneReflect(v reflect.Value) reflect.Value {
+	switch v.Kind() {
+	case reflect.Map:
+		if v.IsNil() {
+			return v
 		}
-		return items
+		clone := reflect.MakeMapWithSize(v.Type(), v.Len())
+		for _, key := range v.MapKeys() {
+			clone.SetMapIndex(key, cloneReflect(v.MapIndex(key)))
+		}
+		return clone
+
+	case reflect.Slice:
+		if v.IsNil() {
+			return v
+		}
+		clone := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := 0; i < v.Len(); i++ {
+			clone.Index(i).Set(cloneReflect(v.Index(i)))
+		}
+		return clone
+
+	case reflect.Array:
+		clone := reflect.New(v.Type()).Elem()
+		for i := 0; i < v.Len(); i++ {
+			clone.Index(i).Set(cloneReflect(v.Index(i)))
+		}
+		return clone
+
+	case reflect.Pointer:
+		if v.IsNil() {
+			return v
+		}
+		clone := reflect.New(v.Type().Elem())
+		clone.Elem().Set(cloneReflect(v.Elem()))
+		return clone
+
+	case reflect.Interface:
+		if v.IsNil() {
+			return v
+		}
+		clone := reflect.New(v.Type()).Elem()
+		clone.Set(cloneReflect(v.Elem()))
+		return clone
+
 	default:
-		return val
+		return v
 	}
 }

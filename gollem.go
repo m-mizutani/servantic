@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/gollem-dev/gollem/internal/jsonutil"
 	"github.com/gollem-dev/gollem/trace"
 	"github.com/google/uuid"
 	"github.com/m-mizutani/goerr/v2"
@@ -723,13 +724,16 @@ func executeToolCall(ctx context.Context, logger *slog.Logger, toolCall *Functio
 	logger.Debug("gollem tool result", "tool", toolCall.Name, "result", toolResult, "duration_ms", resp.Duration)
 
 	// Sanitize result to ensure a generic JSON-compatible structure for LLM processing.
+	// Decoding keeps numbers as json.Number: a plain decode into map[string]any would
+	// turn every number into a float64, so an ID or timestamp wider than 53 bits would
+	// reach the model rounded to a different value than the tool returned.
 	if toolResult != nil {
 		marshaled, err := json.Marshal(toolResult)
 		if err != nil {
 			return FunctionResponse{}, goerr.Wrap(err, "failed to marshal result", goerr.V("result", toolResult))
 		}
-		var unmarshaled map[string]any
-		if err := json.Unmarshal(marshaled, &unmarshaled); err != nil {
+		unmarshaled, err := jsonutil.DecodeObject(marshaled)
+		if err != nil {
 			return FunctionResponse{}, goerr.Wrap(err, "failed to unmarshal result", goerr.V("marshaled", string(marshaled)))
 		}
 		toolResult = unmarshaled

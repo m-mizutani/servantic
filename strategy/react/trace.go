@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gollem-dev/gollem"
+	"github.com/m-mizutani/goerr/v2"
 )
 
 // addTAOEntry adds a new TAO entry to the trace
@@ -61,8 +62,10 @@ func (s *Strategy) recordObservation(toolResults []ToolResult, success bool, err
 	s.currentEntry = nil
 }
 
-// convertFunctionResponsesToToolResults converts gollem.FunctionResponse to ToolResult
-func convertFunctionResponsesToToolResults(inputs []gollem.Input) []ToolResult {
+// convertFunctionResponsesToToolResults converts gollem.FunctionResponse to ToolResult.
+// An encoding failure is returned rather than ignored: Output feeds the observation prompt,
+// so dropping it would leave the model reasoning about an empty tool result.
+func convertFunctionResponsesToToolResults(inputs []gollem.Input) ([]ToolResult, error) {
 	var results []ToolResult
 
 	for _, input := range inputs {
@@ -76,16 +79,19 @@ func convertFunctionResponsesToToolResults(inputs []gollem.Input) []ToolResult {
 				result.Error = fr.Error.Error()
 			} else {
 				// Convert Data to string representation
-				if dataBytes, err := json.Marshal(fr.Data); err == nil {
-					result.Output = string(dataBytes)
+				dataBytes, err := json.Marshal(fr.Data)
+				if err != nil {
+					return nil, goerr.Wrap(err, "failed to encode tool result for observation",
+						goerr.V("tool", fr.Name))
 				}
+				result.Output = string(dataBytes)
 			}
 
 			results = append(results, result)
 		}
 	}
 
-	return results
+	return results, nil
 }
 
 // ExportTrace exports the complete trace data

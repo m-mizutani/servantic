@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/gollem-dev/gollem/internal/jsonutil"
 	"github.com/m-mizutani/goerr/v2"
 )
 
@@ -183,8 +184,10 @@ func toResultMap[Out any](out Out) (map[string]any, error) {
 		return nil, goerr.Wrap(err, "failed to encode tool result", goerr.V("type", fmt.Sprintf("%T", out)))
 	}
 
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
+	// Decode with json.Number so an int64 field of Out is not rounded to float64
+	// on its way into the wire map.
+	m, err := jsonutil.DecodeObject(raw)
+	if err != nil {
 		return nil, goerr.Wrap(ErrInvalidToolType, "tool result must encode to a JSON object",
 			goerr.V("type", fmt.Sprintf("%T", out)))
 	}

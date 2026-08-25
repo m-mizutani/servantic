@@ -527,3 +527,35 @@ func TestToolResponsesInSeparateMessagesBecomeOneContent(t *testing.T) {
 	gt.Value(t, contents[2].Parts[0].FunctionResponse.Name).Equal("alpha")
 	gt.Value(t, contents[2].Parts[1].FunctionResponse.Name).Equal("beta")
 }
+
+// A tool argument wider than float64 must reach the Gemini request with the value the
+// model sent. The genai SDK encodes the request with encoding/json, so the check is made
+// on the same encoder that builds the request body.
+func TestGeminiHistoryPreservesWideIntegers(t *testing.T) {
+	const wide = "9007199254740993"
+
+	call, err := gollem.NewToolCallContent("call_1", "lookup", map[string]any{"id": json.Number(wide)})
+	gt.NoError(t, err)
+	resp, err := gollem.NewToolResponseContent("call_1", "lookup", map[string]any{"account": json.Number(wide)}, false)
+	gt.NoError(t, err)
+
+	history := &gollem.History{
+		LLType:  gollem.LLMTypeGemini,
+		Version: gollem.HistoryVersion,
+		Messages: []gollem.Message{
+			{Role: gollem.RoleAssistant, Contents: []gollem.MessageContent{call}},
+			{Role: gollem.RoleTool, Contents: []gollem.MessageContent{resp}},
+		},
+	}
+
+	contents, err := gemini.ToContents(history)
+	gt.NoError(t, err)
+
+	encodedArgs, err := json.Marshal(contents[0].Parts[0].FunctionCall.Args)
+	gt.NoError(t, err)
+	gt.Equal(t, `{"id":`+wide+`}`, string(encodedArgs))
+
+	encodedResp, err := json.Marshal(contents[1].Parts[0].FunctionResponse.Response)
+	gt.NoError(t, err)
+	gt.Equal(t, `{"account":`+wide+`}`, string(encodedResp))
+}

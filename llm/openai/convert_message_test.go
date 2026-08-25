@@ -187,3 +187,30 @@ func TestOpenAIMessageRoundTrip(t *testing.T) {
 	// so round-trip conversion will not preserve the original function format.
 	// This is expected behavior in v3.
 }
+
+// OpenAI carries tool arguments as a JSON string, so this pins the exact bytes the request
+// contains: an integer wider than float64 must not come back rounded.
+func TestOpenAIHistoryPreservesWideIntegers(t *testing.T) {
+	const wide = "9007199254740993"
+
+	messages := []openaiSDK.ChatCompletionMessage{
+		{
+			Role: "assistant",
+			ToolCalls: []openaiSDK.ToolCall{{
+				ID:       "call_1",
+				Type:     "function",
+				Function: openaiSDK.FunctionCall{Name: "lookup", Arguments: `{"id":` + wide + `}`},
+			}},
+		},
+		{Role: "tool", ToolCallID: "call_1", Name: "lookup", Content: `{"account":` + wide + `}`},
+	}
+
+	history, err := openai.NewHistory(messages)
+	gt.NoError(t, err)
+
+	restored, err := openai.ToMessages(history)
+	gt.NoError(t, err)
+
+	gt.Equal(t, `{"id":`+wide+`}`, restored[0].ToolCalls[0].Function.Arguments)
+	gt.Equal(t, `{"account":`+wide+`}`, restored[1].Content)
+}

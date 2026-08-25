@@ -2,6 +2,7 @@ package claude_test
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -9,6 +10,19 @@ import (
 	"github.com/gollem-dev/gollem/llm/claude"
 	"github.com/m-mizutani/gt"
 )
+
+// marshalMessages renders messages the way the Anthropic SDK sends them, so tests compare
+// what the API receives instead of the Go representation that produced it.
+func marshalMessages(t *testing.T, messages []anthropic.MessageParam) []string {
+	t.Helper()
+	out := make([]string, 0, len(messages))
+	for _, msg := range messages {
+		data, err := msg.MarshalJSON()
+		gt.NoError(t, err)
+		out = append(out, string(data))
+	}
+	return out
+}
 
 func TestClaudeMessageRoundTrip(t *testing.T) {
 	type testCase struct {
@@ -26,8 +40,10 @@ func TestClaudeMessageRoundTrip(t *testing.T) {
 			restored, err := claude.ToMessages(history)
 			gt.NoError(t, err)
 
-			// Compare messages
-			gt.Equal(t, tc.messages, restored)
+			// Compare the wire form rather than the Go values. A tool_use input is carried
+			// as json.RawMessage so that the SDK encoder emits the arguments verbatim, so
+			// two message lists that produce the same request can differ as Go structs.
+			gt.Equal(t, marshalMessages(t, tc.messages), marshalMessages(t, restored))
 		}
 	}
 
@@ -233,4 +249,84 @@ func TestToolResponsesInSeparateMessagesBecomeOneMessage(t *testing.T) {
 	gt.Value(t, messages[2].Content[0].OfToolResult.ToolUseID).Equal("c1")
 	gt.NotNil(t, messages[2].Content[1].OfToolResult)
 	gt.Value(t, messages[2].Content[1].OfToolResult.ToolUseID).Equal("c2")
+}
+
+// A Claude tool_result block carries no tool name. Gemini requires one on every
+// functionResponse part, so the name is recovered from the tool_use block with the same ID.
+func TestNewHistoryRecoversToolNameForToolResults(t *testing.T) {
+	messages := []anthropic.MessageParam{
+		anthropic.NewUserMessage(anthropic.NewTextBlock("what is the weather")),
+		anthropic.NewAssistantMessage(
+			anthropic.NewToolUseBlock("call_1", map[string]any{"city": "Tokyo"}, "get_weather"),
+		),
+		anthropic.NewUserMessage(
+			anthropic.NewToolResultBlock("call_1", `{"temperature":25}`, false),
+		),
+	}
+
+	history, err := claude.NewHistory(messages)
+	gt.NoError(t, err)
+
+	resp, err := history.Messages[2].Contents[0].GetToolResponseContent()
+	gt.NoError(t, err)
+	gt.Equal(t, "call_1", resp.ToolCallID)
+	gt.Equal(t, "get_weather", resp.Name)
+}
+
+// A tool_result for a tool_use that is not in the message list has no name to recover.
+// The response must still convert rather than fail.
+func TestNewHistoryToolResultWithoutMatchingToolUse(t *testing.T) {
+	messages := []anthropic.MessageParam{
+		anthropic.NewUserMessage(
+			anthropic.NewToolResultBlock("orphan", `{"ok":true}`, false),
+		),
+	}
+
+	history, err := claude.NewHistory(messages)
+	gt.NoError(t, err)
+
+	resp, err := history.Messages[0].Contents[0].GetToolResponseContent()
+	gt.NoError(t, err)
+	gt.Equal(t, "orphan", resp.ToolCallID)
+	gt.Equal(t, "", resp.Name)
+}
+
+// Tool arguments and results wider than float64 must reach the Anthropic request with the
+// value the model sent. The Anthropic SDK marshals tool_use input through its own encoder,
+// so this exercises the whole path rather than encoding/json alone.
+func TestClaudeHistoryPreservesWideIntegers(t *testing.T) {
+	const wide = "9007199254740993"
+
+	messages := []anthropic.MessageParam{
+		anthropic.NewAssistantMessage(
+			anthropic.NewToolUseBlock("call_1", map[string]any{"id": json.Number(wide)}, "lookup"),
+		),
+		anthropic.NewUserMessage(
+			anthropic.NewToolResultBlock("call_1", `{"account":9007199254740993}`, false),
+		),
+	}
+
+	history, err := claude.NewHistory(messages)
+	gt.NoError(t, err)
+
+	call, err := history.Messages[0].Contents[0].GetToolCallContent()
+	gt.NoError(t, err)
+	encodedArgs, err := json.Marshal(call.Arguments)
+	gt.NoError(t, err)
+	gt.Equal(t, `{"id":`+wide+`}`, string(encodedArgs))
+
+	resp, err := history.Messages[1].Contents[0].GetToolResponseContent()
+	gt.NoError(t, err)
+	encodedResp, err := json.Marshal(resp.Response)
+	gt.NoError(t, err)
+	gt.Equal(t, `{"account":`+wide+`}`, string(encodedResp))
+
+	// Back into Claude's own request types, then out through the SDK's encoder.
+	// anthropic.MessageParam has its own MarshalJSON, so this is the wire form the
+	// Anthropic API actually receives, not encoding/json's view of it.
+	restored, err := claude.ToMessages(history)
+	gt.NoError(t, err)
+	wire, err := restored[0].MarshalJSON()
+	gt.NoError(t, err)
+	gt.S(t, string(wire)).Contains(`"id":` + wide)
 }

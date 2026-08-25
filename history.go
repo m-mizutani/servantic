@@ -107,17 +107,36 @@ func cloneMessage(m Message) Message {
 	}
 
 	if m.Metadata != nil {
-		// Use JSON round-trip to deep-copy Metadata values, which may themselves be
-		// reference types (maps or slices).
-		if data, err := json.Marshal(m.Metadata); err == nil {
-			var metaCopy map[string]interface{}
-			if err := json.Unmarshal(data, &metaCopy); err == nil {
-				clone.Metadata = metaCopy
-			}
-		}
-		// If marshal/unmarshal fails (should not happen for well-formed metadata),
-		// clone.Metadata remains nil rather than sharing the original's references.
+		// Copy structurally rather than through a JSON round-trip. The round-trip could
+		// fail (dropping Metadata silently, since Clone reports no error) and it rewrote
+		// every number as a float64, so an int64 stored in Metadata came back rounded.
+		clone.Metadata = cloneAnyMap(m.Metadata)
 	}
 
 	return clone
+}
+
+// cloneAnyMap returns a deep copy of a decoded-JSON-shaped map. Maps and slices are copied
+// recursively; every other value is immutable once decoded and is copied by assignment.
+func cloneAnyMap(m map[string]any) map[string]any {
+	clone := make(map[string]any, len(m))
+	for k, v := range m {
+		clone[k] = cloneAnyValue(v)
+	}
+	return clone
+}
+
+func cloneAnyValue(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		return cloneAnyMap(val)
+	case []any:
+		items := make([]any, len(val))
+		for i, item := range val {
+			items[i] = cloneAnyValue(item)
+		}
+		return items
+	default:
+		return val
+	}
 }

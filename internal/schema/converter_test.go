@@ -83,3 +83,30 @@ func TestConvertParameterToJSONStringIsByteStable(t *testing.T) {
 		gt.Equal(t, first, actual)
 	}
 }
+
+// The result is embedded verbatim into the Claude system prompt, so the model must read the
+// characters the schema author wrote, not encoding/json's HTML escapes for them.
+func TestConvertParameterToJSONStringDoesNotEscapeHTML(t *testing.T) {
+	param := &gollem.Parameter{
+		Type:        gollem.TypeObject,
+		Description: `set when a<b && b>c`,
+		Properties: map[string]*gollem.Parameter{
+			"expr": {
+				Type:        gollem.TypeString,
+				Description: `an expression such as "x > 1 & y < 2"`,
+				Required:    true,
+			},
+		},
+	}
+
+	out, err := schema.ConvertParameterToJSONString(param)
+	gt.NoError(t, err)
+
+	// With HTML escaping on, these substrings would appear as unicode escapes instead.
+	gt.S(t, out).Contains(`set when a<b && b>c`)
+	gt.S(t, out).Contains(`x > 1 & y < 2`)
+
+	// It must still be valid JSON.
+	var decoded map[string]any
+	gt.NoError(t, json.Unmarshal([]byte(out), &decoded))
+}

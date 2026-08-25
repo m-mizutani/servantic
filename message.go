@@ -2,6 +2,8 @@ package gollem
 
 import (
 	"encoding/json"
+
+	"github.com/gollem-dev/gollem/internal/jsonutil"
 )
 
 // Message represents a unified message format that can be converted between different LLM providers.
@@ -95,12 +97,14 @@ func makeContent[T any](t MessageContentType, v T) (MessageContent, error) {
 }
 
 // decodeContent checks that mc has the expected type, then decodes its Data into T.
+// The decode preserves numbers that a float64 cannot represent exactly, so a tool
+// argument or result stored in a History is replayed to the provider unchanged.
 func decodeContent[T any](t MessageContentType, mc *MessageContent) (*T, error) {
 	if mc.Type != t {
 		return nil, ErrInvalidHistoryData
 	}
 	var content T
-	if err := json.Unmarshal(mc.Data, &content); err != nil {
+	if err := jsonutil.Decode(mc.Data, &content); err != nil {
 		return nil, err
 	}
 	return &content, nil

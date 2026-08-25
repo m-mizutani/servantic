@@ -3,6 +3,7 @@ package planexec
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/gollem-dev/gollem"
@@ -45,10 +46,18 @@ func parseTaskResult(response *gollem.Response, nextInput []gollem.Input) string
 		results = append(results, "Tool calls executed:")
 		for _, fc := range response.FunctionCalls {
 			results = append(results, "- "+fc.Name)
-			// Include arguments if any
+			// Include arguments if any. The names are sorted because this text becomes
+			// Task.Result and is embedded verbatim into the plan and reflect prompts;
+			// map iteration order would make the same tool call render differently on
+			// every run.
 			if len(fc.Arguments) > 0 {
-				for key, val := range fc.Arguments {
-					results = append(results, fmt.Sprintf("  %s: %v", key, val))
+				names := make([]string, 0, len(fc.Arguments))
+				for key := range fc.Arguments {
+					names = append(names, key)
+				}
+				slices.Sort(names)
+				for _, key := range names {
+					results = append(results, fmt.Sprintf("  %s: %v", key, fc.Arguments[key]))
 				}
 			}
 		}

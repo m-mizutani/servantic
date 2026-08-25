@@ -12,6 +12,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/gollem-dev/gollem"
+	"github.com/gollem-dev/gollem/internal/jsonutil"
 	"github.com/gollem-dev/gollem/internal/schema"
 	"github.com/gollem-dev/gollem/trace"
 	"github.com/m-mizutani/goerr/v2"
@@ -618,8 +619,8 @@ func processResponseWithContentType(ctx context.Context, resp *anthropic.Message
 			response.Texts = append(response.Texts, text)
 		case "tool_use":
 			toolUseBlock := content.AsToolUse()
-			var args map[string]any
-			if err := json.Unmarshal(toolUseBlock.Input, &args); err != nil {
+			args, err := jsonutil.DecodeObject(toolUseBlock.Input)
+			if err != nil {
 				response.Error = goerr.Wrap(err, "failed to unmarshal function arguments")
 				return response
 			}
@@ -933,9 +934,11 @@ func (a *FunctionCallAccumulator) accumulate() (*gollem.FunctionCall, error) {
 
 	var args map[string]any
 	if a.Arguments != "" {
-		if err := json.Unmarshal([]byte(a.Arguments), &args); err != nil {
+		decoded, err := jsonutil.DecodeObject([]byte(a.Arguments))
+		if err != nil {
 			return nil, goerr.Wrap(err, "failed to unmarshal function call arguments", goerr.V("accumulator", a))
 		}
+		args = decoded
 	}
 
 	return &gollem.FunctionCall{

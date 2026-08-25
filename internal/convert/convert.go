@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/gollem-dev/gollem"
+	"github.com/gollem-dev/gollem/internal/jsonutil"
 	"github.com/m-mizutani/goerr/v2"
 )
 
@@ -28,10 +29,12 @@ type ConversionWarning struct {
 	Value   interface{}
 }
 
-// ParseJSONArguments attempts to parse a JSON string into a map
+// ParseJSONArguments attempts to parse a JSON string into a map.
+// Numbers are kept as json.Number so that an argument wider than 53 bits
+// survives the round-trip back into the provider request unchanged.
 func ParseJSONArguments(jsonStr string) (map[string]interface{}, error) {
-	var args map[string]interface{}
-	if err := json.Unmarshal([]byte(jsonStr), &args); err != nil {
+	args, err := jsonutil.DecodeObject([]byte(jsonStr))
+	if err != nil {
 		return nil, goerr.Wrap(err, "failed to parse JSON arguments")
 	}
 	return args, nil
@@ -74,9 +77,13 @@ func ConvertRoleToCommon(role string) gollem.MessageRole {
 //
 // The given slice and its messages are left untouched: the caller's History must survive a
 // conversion unchanged, since the same History is converted again on every later request.
-func MergeSystemIntoFirstUser(messages []gollem.Message) []gollem.Message {
+//
+// An error is returned when the system message cannot be decoded or the merged text cannot be
+// encoded. Both failures used to be ignored, which dropped the system prompt from the request
+// while the request itself still succeeded.
+func MergeSystemIntoFirstUser(messages []gollem.Message) ([]gollem.Message, error) {
 	if len(messages) == 0 {
-		return messages
+		return messages, nil
 	}
 
 	// Find the first system message
@@ -89,12 +96,14 @@ func MergeSystemIntoFirstUser(messages []gollem.Message) []gollem.Message {
 			for _, content := range msg.Contents {
 				if content.Type == gollem.MessageContentTypeText {
 					var textContent gollem.TextContent
-					if err := json.Unmarshal(content.Data, &textContent); err == nil {
-						if systemContent != "" {
-							systemContent += "\n"
-						}
-						systemContent += textContent.Text
+					if err := json.Unmarshal(content.Data, &textContent); err != nil {
+						return nil, goerr.Wrap(err, "failed to decode system text content",
+							goerr.V("message_index", i))
 					}
+					if systemContent != "" {
+						systemContent += "\n"
+					}
+					systemContent += textContent.Text
 				}
 			}
 			break
@@ -102,7 +111,7 @@ func MergeSystemIntoFirstUser(messages []gollem.Message) []gollem.Message {
 	}
 
 	if systemIndex < 0 {
-		return messages
+		return messages, nil
 	}
 
 	// Remove the system message from the list
@@ -111,7 +120,7 @@ func MergeSystemIntoFirstUser(messages []gollem.Message) []gollem.Message {
 	result = append(result, messages[systemIndex+1:]...)
 
 	if systemContent == "" {
-		return result
+		return result, nil
 	}
 
 	// Find first user message and prepend system content
@@ -121,9 +130,11 @@ func MergeSystemIntoFirstUser(messages []gollem.Message) []gollem.Message {
 			newContent := make([]gollem.MessageContent, 0, len(msg.Contents)+1)
 
 			// Add system content first
-			if textContent, err := gollem.NewTextContent(systemContent + "\n\n"); err == nil {
-				newContent = append(newContent, textContent)
+			textContent, err := gollem.NewTextContent(systemContent + "\n\n")
+			if err != nil {
+				return nil, goerr.Wrap(err, "failed to encode merged system content")
 			}
+			newContent = append(newContent, textContent)
 
 			// Add existing user content
 			newContent = append(newContent, msg.Contents...)
@@ -133,7 +144,7 @@ func MergeSystemIntoFirstUser(messages []gollem.Message) []gollem.Message {
 		}
 	}
 
-	return result
+	return result, nil
 }
 
 // MergeConsecutiveToolMessages merges each run of consecutive tool messages into a single

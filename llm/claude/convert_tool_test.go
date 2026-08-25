@@ -244,11 +244,9 @@ func TestConvertToolIsByteStable(t *testing.T) {
 	first, err := json.Marshal(claude.ConvertTool(tool))
 	gt.NoError(t, err)
 
-	// Pin that a required array really is present in the marshalled bytes, so
-	// the stability assertion below cannot pass vacuously. This is the nested
-	// object's array: anthropic.ToolUnionParamOfTool only carries the
-	// properties map, so the top-level required array built by
-	// convertParametersToJSONSchema never reaches the request.
+	// Pin that both required arrays really are present in the marshalled bytes,
+	// so the stability assertion below cannot pass vacuously.
+	gt.S(t, string(first)).Contains(`"required":["alpha","bravo","mike","nested","zulu"]`)
 	gt.S(t, string(first)).Contains(`"required":["delta","oscar","yankee"]`)
 
 	for i := 0; i < 100; i++ {
@@ -268,4 +266,19 @@ func TestConvertParameterToSchemaRequiredIsSorted(t *testing.T) {
 		},
 	})
 	gt.Equal(t, []string{"alpha", "mike", "zulu"}, schema.Required)
+}
+
+// TestConvertToolCarriesDescriptionAndRequired pins that the tool definition
+// sent to Claude keeps the fields that describe the tool. Both are set on the
+// ToolParam variant rather than by ToolUnionParamOfTool, so an omission here is
+// silent: the request stays valid but the model loses the tool description and
+// the list of mandatory arguments.
+func TestConvertToolCarriesDescriptionAndRequired(t *testing.T) {
+	converted := claude.ConvertTool(&multiRequiredTool{})
+
+	gt.NotNil(t, converted.OfTool)
+	gt.Equal(t, "multi_required_tool", converted.OfTool.Name)
+	gt.Equal(t, "A tool with several required parameters", converted.OfTool.Description.Value)
+	gt.Equal(t, []string{"alpha", "bravo", "mike", "nested", "zulu"},
+		converted.OfTool.InputSchema.Required)
 }

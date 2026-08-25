@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 
 	"github.com/gollem-dev/gollem"
 	"github.com/gollem-dev/gollem/internal/schema"
@@ -1032,6 +1033,8 @@ func convertParameterToJSONSchemaWithStrict(param *gollem.Parameter, strict bool
 		for key := range param.Properties {
 			allKeys = append(allKeys, key)
 		}
+		// Sort so the emitted schema is byte-identical between identical requests
+		slices.Sort(allKeys)
 		result["required"] = allKeys
 	}
 

@@ -2,6 +2,7 @@ package gemini_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/gollem-dev/gollem"
@@ -493,4 +494,51 @@ func TestNestedObjectRequiredField(t *testing.T) {
 	}
 
 	gt.Value(t, userParam.Required).Equal([]string{})
+}
+
+// multiRequiredTool has several required fields in one properties map so that a
+// schema built from Go map iteration order would differ between conversions.
+type multiRequiredTool struct{}
+
+func (t *multiRequiredTool) Spec() gollem.ToolSpec {
+	return gollem.ToolSpec{
+		Name:        "multi_required_tool",
+		Description: "A tool with several required parameters",
+		Parameters: map[string]*gollem.Parameter{
+			"zulu":  {Type: gollem.TypeString, Required: true},
+			"alpha": {Type: gollem.TypeString, Required: true},
+			"mike":  {Type: gollem.TypeString, Required: true},
+			"bravo": {Type: gollem.TypeString, Required: true},
+			"nested": {
+				Type:     gollem.TypeObject,
+				Required: true,
+				Properties: map[string]*gollem.Parameter{
+					"yankee": {Type: gollem.TypeString, Required: true},
+					"delta":  {Type: gollem.TypeString, Required: true},
+					"oscar":  {Type: gollem.TypeString, Required: true},
+				},
+			},
+		},
+	}
+}
+
+func (t *multiRequiredTool) Run(ctx context.Context, args map[string]any) (map[string]any, error) {
+	return nil, nil
+}
+
+// TestConvertToolIsByteStable pins the function declaration to be byte-identical
+// between conversions of the same spec, so that request snapshots and provider
+// side caching are not defeated by Go map iteration order.
+func TestConvertToolIsByteStable(t *testing.T) {
+	tool := &multiRequiredTool{}
+
+	first, err := json.Marshal(gemini.ConvertTool(tool))
+	gt.NoError(t, err)
+	gt.S(t, string(first)).Contains(`"required":["alpha","bravo","mike","nested","zulu"]`)
+
+	for i := 0; i < 100; i++ {
+		actual, err := json.Marshal(gemini.ConvertTool(tool))
+		gt.NoError(t, err)
+		gt.Equal(t, string(first), string(actual))
+	}
 }

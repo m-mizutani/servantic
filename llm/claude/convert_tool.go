@@ -10,12 +10,22 @@ func convertTool(tool gollem.Tool) anthropic.ToolUnionParam {
 	spec := tool.Spec()
 	schema := convertParametersToJSONSchema(spec.Parameters)
 
-	return anthropic.ToolUnionParamOfTool(
+	// ToolUnionParamOfTool only fills InputSchema and Name, so the description
+	// and the top-level required array have to be set on the variant afterwards.
+	// Without them the model receives the properties alone and is told neither
+	// what the tool does nor which arguments are mandatory.
+	toolParam := anthropic.ToolUnionParamOfTool(
 		anthropic.ToolInputSchemaParam{
 			Properties: schema.Properties,
+			Required:   schema.Required,
 		},
 		spec.Name,
 	)
+	if spec.Description != "" {
+		toolParam.OfTool.Description = anthropic.String(spec.Description)
+	}
+
+	return toolParam
 }
 
 type jsonSchema struct {

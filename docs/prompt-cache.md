@@ -109,3 +109,8 @@ their cache usage is still reported through the observation fields above.
 - **Claude explicit breakpoints.** Manually choosing Claude cache positions in
   the middle of a conversation is not currently exposed; the automatic
   breakpoints above cover the common cases.
+- **Deterministic tool definitions.** Claude matches the cache on an exact byte
+  prefix that begins with the tool definitions, so gollem emits them in a stable
+  order: the tool list is sorted by name, and every JSON Schema `required` array
+  is sorted. A tool whose `Spec()` returns a different name, description, or
+  parameter set between calls still changes the prefix and misses the cache.

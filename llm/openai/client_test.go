@@ -596,3 +596,38 @@ func TestOpenAIStreamUsageLive(t *testing.T) {
 	gt.Value(t, lastInput > 0).Equal(true)
 	gt.Value(t, lastOutput > 0).Equal(true)
 }
+
+// TestConvertResponseSchemaToOpenAIIsByteStable pins the response schema JSON to
+// be byte-identical between conversions. In strict mode every property name is
+// copied into the required array, which is the array most exposed to Go map
+// iteration order.
+func TestConvertResponseSchemaToOpenAIIsByteStable(t *testing.T) {
+	param := &gollem.Parameter{
+		Type: gollem.TypeObject,
+		Properties: map[string]*gollem.Parameter{
+			"zulu":  {Type: gollem.TypeString, Required: true},
+			"alpha": {Type: gollem.TypeString, Required: true},
+			"mike":  {Type: gollem.TypeString},
+			"bravo": {Type: gollem.TypeString},
+		},
+	}
+
+	runTest := func(strict bool, expectedRequired string) func(t *testing.T) {
+		return func(t *testing.T) {
+			first, err := openai.ConvertResponseSchemaToOpenAI(param, strict)
+			gt.NoError(t, err)
+			gt.S(t, string(first.Schema.(json.RawMessage))).Contains(expectedRequired)
+
+			for i := 0; i < 100; i++ {
+				actual, err := openai.ConvertResponseSchemaToOpenAI(param, strict)
+				gt.NoError(t, err)
+				gt.Equal(t,
+					string(first.Schema.(json.RawMessage)),
+					string(actual.Schema.(json.RawMessage)))
+			}
+		}
+	}
+
+	t.Run("strict mode requires every property", runTest(true, `"required":["alpha","bravo","mike","zulu"]`))
+	t.Run("non-strict mode requires the marked properties", runTest(false, `"required":["alpha","zulu"]`))
+}

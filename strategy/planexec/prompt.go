@@ -5,6 +5,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"slices"
 	"strings"
 	"text/template"
 
@@ -170,6 +171,8 @@ func buildToolList(tools []gollem.Tool) string {
 			for paramName := range spec.Parameters {
 				params = append(params, paramName)
 			}
+			// Sort so the prompt text is identical between identical executions
+			slices.Sort(params)
 			if len(params) > 0 {
 				toolDesc += fmt.Sprintf("\n  Parameters: %s", strings.Join(params, ", "))
 			}

@@ -1759,3 +1759,64 @@ func TestStreamingUsageNotMultiplied(t *testing.T) {
 	gt.Equal(t, 5, strat.got.OutputToken)
 	gt.Equal(t, 50, strat.got.CacheReadInputToken)
 }
+
+// TestToolOrderIsDeterministic pins the order of the tools handed to the session
+// to be sorted by name and identical between executions. The tool definitions
+// are the first element of the request prefix that Anthropic matches the prompt
+// cache against, so a list ordered by Go map iteration defeats the cache.
+func TestToolOrderIsDeterministic(t *testing.T) {
+	newTool := func(name string) gollem.Tool {
+		return &mockTool{
+			spec: gollem.ToolSpec{
+				Name:        name,
+				Description: "tool " + name,
+				Parameters:  map[string]*gollem.Parameter{},
+			},
+			run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+				return map[string]any{}, nil
+			},
+		}
+	}
+	names := []string{"zulu", "alpha", "mike", "bravo", "oscar", "delta", "yankee"}
+
+	tools := make([]gollem.Tool, 0, len(names))
+	for _, name := range names {
+		tools = append(tools, newTool(name))
+	}
+
+	execute := func(t *testing.T) []string {
+		t.Helper()
+		var captured []string
+		mockClient := &mock.LLMClientMock{
+			NewSessionFunc: func(ctx context.Context, options ...gollem.SessionOption) (gollem.Session, error) {
+				cfg := gollem.NewSessionConfig(options...)
+				for _, tool := range cfg.Tools() {
+					captured = append(captured, tool.Spec().Name)
+				}
+				return &mock.SessionMock{
+					GenerateFunc: func(ctx context.Context, input []gollem.Input, opts ...gollem.GenerateOption) (*gollem.Response, error) {
+						return &gollem.Response{Texts: []string{"done"}}, nil
+					},
+				}, nil
+			},
+		}
+
+		agent := gollem.New(mockClient, gollem.WithTools(tools...), gollem.WithLoopLimit(2))
+		_, err := agent.Execute(t.Context(), gollem.Text("hi"))
+		gt.NoError(t, err)
+		return captured
+	}
+
+	// Compare the whole captured list rather than a prefix of it: the default
+	// strategy contributes no tools, so any extra entry means the session was
+	// built from something other than the sorted tool list.
+	first := execute(t)
+	gt.Array(t, first).
+		Equal([]string{"alpha", "bravo", "delta", "mike", "oscar", "yankee", "zulu"})
+
+	// Each execution rebuilds the list from the tool map, so repeat it enough
+	// times that a randomized order could not survive by chance.
+	for i := 0; i < 20; i++ {
+		gt.Equal(t, first, execute(t))
+	}
+}

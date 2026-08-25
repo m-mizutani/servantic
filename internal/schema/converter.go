@@ -2,12 +2,17 @@ package schema
 
 import (
 	"encoding/json"
+	"slices"
 
 	"github.com/gollem-dev/gollem"
 	"github.com/m-mizutani/goerr/v2"
 )
 
-// CollectRequiredFields returns a list of required property names
+// CollectRequiredFields returns a list of required property names in ascending
+// name order. The order must not depend on Go map iteration: the result is
+// emitted verbatim as the JSON Schema "required" array, and Anthropic matches
+// the prompt cache on an exact byte prefix that starts with the tool
+// definitions, so a reordered array invalidates every cache breakpoint.
 func CollectRequiredFields(properties map[string]*gollem.Parameter) []string {
 	var required []string
 	for name, prop := range properties {
@@ -15,6 +20,7 @@ func CollectRequiredFields(properties map[string]*gollem.Parameter) []string {
 			required = append(required, name)
 		}
 	}
+	slices.Sort(required)
 	return required
 }
 

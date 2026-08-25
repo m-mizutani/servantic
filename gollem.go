@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/gollem-dev/gollem/trace"
@@ -307,11 +308,19 @@ func setupTools(ctx context.Context, cfg *gollemConfig) (map[string]Tool, []Tool
 		return nil, nil, err
 	}
 
-	toolList := make([]Tool, 0, len(toolMap))
+	// Order the tools by name instead of by map iteration order. The tool
+	// definitions are the first element of the request prefix that Anthropic
+	// matches the prompt cache against, so a list that is shuffled on every
+	// execution invalidates the cache for every session.
 	toolNames := make([]string, 0, len(toolMap))
-	for _, tool := range toolMap {
-		toolList = append(toolList, tool)
-		toolNames = append(toolNames, tool.Spec().Name)
+	for name := range toolMap {
+		toolNames = append(toolNames, name)
+	}
+	slices.Sort(toolNames)
+
+	toolList := make([]Tool, 0, len(toolMap))
+	for _, name := range toolNames {
+		toolList = append(toolList, toolMap[name])
 	}
 	cfg.logger.Debug("gollem tool list", "names", toolNames)
 

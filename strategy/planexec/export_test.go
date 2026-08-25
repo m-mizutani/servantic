@@ -12,3 +12,4 @@ var GetNextPendingTask = getNextPendingTask
 var AllTasksCompleted = allTasksCompleted
 var GenerateFinalResponse = generateFinalResponse
 var FormatToolResult = formatToolResult
+var BuildToolList = buildToolList

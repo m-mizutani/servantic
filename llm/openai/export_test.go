@@ -9,6 +9,7 @@ import (
 var (
 	ConvertTool                   = convertTool
 	ConvertParameterToSchema      = convertParameterToSchema
+	ConvertResponseSchemaToOpenAI = convertResponseSchemaToOpenAI
 	TokenLimitErrorOptions        = tokenLimitErrorOptions
 	OpenaiMessagesToTraceMessages = openaiMessagesToTraceMessages
 )

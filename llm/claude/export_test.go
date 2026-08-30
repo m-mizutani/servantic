@@ -69,3 +69,9 @@ func NewSessionWithAPIClient(client apiClient, cfg gollem.SessionConfig, model s
 func GetBaseURL(client *Client) string {
 	return client.baseURL
 }
+
+// NewVertexClientWithOptions builds a VertexClient through the same defaults
+// and option handling NewWithVertex uses, for tests that must not reach GCP.
+func NewVertexClientWithOptions(options ...VertexOption) *VertexClient {
+	return newConfiguredVertexClient(options...)
+}

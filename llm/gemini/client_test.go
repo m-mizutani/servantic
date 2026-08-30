@@ -1526,3 +1526,45 @@ func TestGeminiStreamUsageNotSummed(t *testing.T) {
 	gt.Equal(t, 100, lastInput)
 	gt.Equal(t, 50, lastCacheRead)
 }
+
+var _ gollem.ModelNamer = (*gemini.Client)(nil)
+
+// TestClientModel verifies that the client reports the model name it was
+// configured with, without consulting the API. The client is built through
+// NewClientWithOptions, which runs the same defaults and option handling as
+// gemini.New but stops before the GCP credential lookup that New performs.
+func TestClientModel(t *testing.T) {
+	type testCase struct {
+		options  []gemini.Option
+		expected string
+	}
+
+	runTest := func(tc testCase) func(t *testing.T) {
+		return func(t *testing.T) {
+			client := gemini.NewClientWithOptions(tc.options...)
+			gt.Equal(t, tc.expected, client.Model())
+		}
+	}
+
+	t.Run("configured model", runTest(testCase{
+		options:  []gemini.Option{gemini.WithModel("gemini-3-pro-preview")},
+		expected: "gemini-3-pro-preview",
+	}))
+
+	t.Run("default model when no option is given", runTest(testCase{
+		expected: gemini.DefaultModel,
+	}))
+
+	t.Run("last option wins", runTest(testCase{
+		options: []gemini.Option{
+			gemini.WithModel("gemini-3-pro-preview"),
+			gemini.WithModel("gemini-3.5-flash-lite"),
+		},
+		expected: "gemini-3.5-flash-lite",
+	}))
+
+	t.Run("empty model is reported as configured", runTest(testCase{
+		options:  []gemini.Option{gemini.WithModel("")},
+		expected: "",
+	}))
+}

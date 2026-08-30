@@ -202,14 +202,11 @@ func WithContentType(contentType gollem.ContentType) Option {
 // The default thinking configuration is ThinkingLevelLow, which works with
 // Gemini 3.x models. Callers using Gemini 2.x models that do not support
 // thinking_level should override this via WithThinkingBudget.
-func New(ctx context.Context, projectID, location string, options ...Option) (*Client, error) {
-	if projectID == "" {
-		return nil, goerr.New("projectID is required")
-	}
-	if location == "" {
-		return nil, goerr.New("location is required")
-	}
-
+// newConfiguredClient builds a Client from the defaults and the given options,
+// stopping short of the parts that need GCP credentials. It is split out of New
+// so that tests can exercise the real defaults and option handling without
+// reaching Vertex AI.
+func newConfiguredClient(projectID, location string, options ...Option) *Client {
 	client := &Client{
 		projectID:      projectID,
 		location:       location,
@@ -227,6 +224,19 @@ func New(ctx context.Context, projectID, location string, options ...Option) (*C
 		option(client)
 	}
 
+	return client
+}
+
+func New(ctx context.Context, projectID, location string, options ...Option) (*Client, error) {
+	if projectID == "" {
+		return nil, goerr.New("projectID is required")
+	}
+	if location == "" {
+		return nil, goerr.New("location is required")
+	}
+
+	client := newConfiguredClient(projectID, location, options...)
+
 	// Create client configuration for Vertex AI backend
 	config := &genai.ClientConfig{
 		Project:  projectID,
@@ -242,6 +252,11 @@ func New(ctx context.Context, projectID, location string, options ...Option) (*C
 	client.client = newClient
 	return client, nil
 }
+
+// Model returns the model name this client generates through. It is the name
+// the client was configured with, so a caller can key its own tables by the
+// same string it passed to WithModel.
+func (c *Client) Model() string { return c.defaultModel }
 
 // NewSession creates a new session for the Gemini API.
 // It converts the provided tools to Gemini's tool format and initializes a new chat session.

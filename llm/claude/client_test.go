@@ -1012,3 +1012,49 @@ func TestGenerateWithResolvedMaxTokens(t *testing.T) {
 		gt.False(t, strings.Contains(err.Error(), guardMessage))
 	})
 }
+
+// claudeDefaultModel is the model claude.New falls back to when WithModel is
+// not given. It is written out here instead of being read back from the
+// client, so that changing the default has to be a deliberate edit.
+const claudeDefaultModel = "claude-sonnet-4-5-20250929"
+
+var _ gollem.ModelNamer = (*claude.Client)(nil)
+
+// TestClientModel verifies that the client reports the model name it was
+// configured with, without consulting the API.
+func TestClientModel(t *testing.T) {
+	type testCase struct {
+		options  []claude.Option
+		expected string
+	}
+
+	runTest := func(tc testCase) func(t *testing.T) {
+		return func(t *testing.T) {
+			client, err := claude.New(context.Background(), "test-key", tc.options...)
+			gt.NoError(t, err).Required()
+			gt.Equal(t, tc.expected, client.Model())
+		}
+	}
+
+	t.Run("configured model", runTest(testCase{
+		options:  []claude.Option{claude.WithModel("claude-opus-4-1-20250805")},
+		expected: "claude-opus-4-1-20250805",
+	}))
+
+	t.Run("default model when no option is given", runTest(testCase{
+		expected: claudeDefaultModel,
+	}))
+
+	t.Run("last option wins", runTest(testCase{
+		options: []claude.Option{
+			claude.WithModel("claude-opus-4-1-20250805"),
+			claude.WithModel("claude-haiku-4-5-20251001"),
+		},
+		expected: "claude-haiku-4-5-20251001",
+	}))
+
+	t.Run("empty model is reported as configured", runTest(testCase{
+		options:  []claude.Option{claude.WithModel("")},
+		expected: "",
+	}))
+}

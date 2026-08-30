@@ -17,6 +17,20 @@ type LLMClient interface {
 	GenerateEmbedding(ctx context.Context, dimension int, input []string) ([][]float64, error)
 }
 
+// ModelNamer is implemented by an LLMClient that can report the model it
+// generates through. The value is the model name the client was configured
+// with, not the model id an API response may report.
+//
+// It is optional: an LLMClient that does not implement it keeps working, and a
+// caller obtains the name with a type assertion.
+//
+//	if n, ok := client.(gollem.ModelNamer); ok {
+//		model = n.Model()
+//	}
+type ModelNamer interface {
+	Model() string
+}
+
 type FunctionCall struct {
 	ID        string
 	Name      string

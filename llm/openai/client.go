@@ -237,6 +237,11 @@ type Session struct {
 	strictMode bool
 }
 
+// Model returns the model name this client generates through. It is the name
+// the client was configured with, so a caller can key its own tables by the
+// same string it passed to WithModel.
+func (c *Client) Model() string { return c.defaultModel }
+
 // NewSession creates a new session for the OpenAI API.
 // It converts the provided tools to OpenAI's tool format and initializes a new chat session.
 func (c *Client) NewSession(ctx context.Context, options ...gollem.SessionOption) (gollem.Session, error) {

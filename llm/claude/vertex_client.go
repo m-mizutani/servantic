@@ -83,16 +83,11 @@ func WithVertexSystemPrompt(prompt string) VertexOption {
 	}
 }
 
-// NewWithVertex creates a new client for Claude models via Vertex AI using Anthropic's official SDK.
-// This is the recommended approach as it uses Anthropic's native Vertex AI integration.
-func NewWithVertex(ctx context.Context, region, projectID string, options ...VertexOption) (*VertexClient, error) {
-	if region == "" {
-		return nil, goerr.New("region is required")
-	}
-	if projectID == "" {
-		return nil, goerr.New("projectID is required")
-	}
-
+// newConfiguredVertexClient builds a VertexClient from the defaults and the
+// given options, stopping short of the parts that need GCP credentials. It is
+// split out of NewWithVertex so that tests can exercise the real defaults and
+// option handling without reaching Vertex AI.
+func newConfiguredVertexClient(options ...VertexOption) *VertexClient {
 	client := &VertexClient{
 		defaultModel:   DefaultVertexClaudeModel,
 		embeddingModel: "text-embedding-004",
@@ -111,6 +106,21 @@ func NewWithVertex(ctx context.Context, region, projectID string, options ...Ver
 	if !client.params.maxTokensSet {
 		client.params.MaxTokens = resolveMaxOutputTokens(client.defaultModel)
 	}
+
+	return client
+}
+
+// NewWithVertex creates a new client for Claude models via Vertex AI using Anthropic's official SDK.
+// This is the recommended approach as it uses Anthropic's native Vertex AI integration.
+func NewWithVertex(ctx context.Context, region, projectID string, options ...VertexOption) (*VertexClient, error) {
+	if region == "" {
+		return nil, goerr.New("region is required")
+	}
+	if projectID == "" {
+		return nil, goerr.New("projectID is required")
+	}
+
+	client := newConfiguredVertexClient(options...)
 
 	// Create Anthropic client with Vertex AI integration
 	anthropicClient := anthropic.NewClient(
@@ -131,6 +141,11 @@ type VertexAnthropicSession struct {
 	cfg          gollem.SessionConfig
 	messages     []anthropic.MessageParam
 }
+
+// Model returns the model name this client generates through. It is the name
+// the client was configured with, so a caller can key its own tables by the
+// same string it passed to WithVertexModel.
+func (c *VertexClient) Model() string { return c.defaultModel }
 
 // NewSession creates a new session for Claude via Vertex AI using Anthropic SDK.
 func (c *VertexClient) NewSession(ctx context.Context, options ...gollem.SessionOption) (gollem.Session, error) {

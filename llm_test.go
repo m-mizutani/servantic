@@ -14,6 +14,7 @@ import (
 	"github.com/gollem-dev/gollem/llm/claude"
 	"github.com/gollem-dev/gollem/llm/gemini"
 	"github.com/gollem-dev/gollem/llm/openai"
+	"github.com/gollem-dev/gollem/mock"
 	"github.com/gollem-dev/gollem/trace"
 	"github.com/m-mizutani/gt"
 )
@@ -645,4 +646,25 @@ func countSpansByKind(span *trace.Span, kind trace.SpanKind) int {
 		count += countSpansByKind(child, kind)
 	}
 	return count
+}
+
+// TestModelNamer pins that reporting the model name is optional: a client that
+// implements it answers through the LLMClient a caller already holds, and one
+// that does not is reported as unable rather than failing the caller.
+func TestModelNamer(t *testing.T) {
+	t.Run("implementing client reports its configured model", func(t *testing.T) {
+		client, err := openai.New(context.Background(), "test-key", openai.WithModel("gpt-5-mini"))
+		gt.NoError(t, err).Required()
+
+		var llm gollem.LLMClient = client
+		namer, ok := llm.(gollem.ModelNamer)
+		gt.True(t, ok).Required()
+		gt.Equal(t, "gpt-5-mini", namer.Model())
+	})
+
+	t.Run("non-implementing client reports nothing", func(t *testing.T) {
+		var llm gollem.LLMClient = &mock.LLMClientMock{}
+		_, ok := llm.(gollem.ModelNamer)
+		gt.False(t, ok)
+	})
 }

@@ -228,3 +228,46 @@ func (c *calculatorTool) Run(ctx context.Context, args map[string]any) (map[stri
 
 	return map[string]any{"result": result}, nil
 }
+
+var _ gollem.ModelNamer = (*claude.VertexClient)(nil)
+
+// TestVertexClientModel verifies that the client reports the model name it was
+// configured with, without consulting the API. The client is built through
+// NewVertexClientWithOptions, which runs the same defaults and option handling
+// as NewWithVertex but stops before the GCP credential lookup that
+// NewWithVertex performs.
+func TestVertexClientModel(t *testing.T) {
+	type testCase struct {
+		options  []claude.VertexOption
+		expected string
+	}
+
+	runTest := func(tc testCase) func(t *testing.T) {
+		return func(t *testing.T) {
+			client := claude.NewVertexClientWithOptions(tc.options...)
+			gt.Equal(t, tc.expected, client.Model())
+		}
+	}
+
+	t.Run("configured model", runTest(testCase{
+		options:  []claude.VertexOption{claude.WithVertexModel("claude-opus-4-5@20251101")},
+		expected: "claude-opus-4-5@20251101",
+	}))
+
+	t.Run("default model when no option is given", runTest(testCase{
+		expected: claude.DefaultVertexClaudeModel,
+	}))
+
+	t.Run("last option wins", runTest(testCase{
+		options: []claude.VertexOption{
+			claude.WithVertexModel("claude-sonnet-4@20250514"),
+			claude.WithVertexModel("claude-opus-4-5@20251101"),
+		},
+		expected: "claude-opus-4-5@20251101",
+	}))
+
+	t.Run("empty model is reported as configured", runTest(testCase{
+		options:  []claude.VertexOption{claude.WithVertexModel("")},
+		expected: "",
+	}))
+}

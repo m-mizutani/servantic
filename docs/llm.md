@@ -429,6 +429,47 @@ embeddings, err := client.GenerateEmbedding(ctx,
 )
 ```
 
+### Reporting the Configured Model Name
+
+A caller that meters, prices, or audits generations needs to record which model
+produced a response. `gollem.ModelNamer` is an optional interface that reports
+it, so the caller no longer has to mirror its own client-construction settings:
+
+```go
+type ModelNamer interface {
+    Model() string
+}
+```
+
+All clients shipped with gollem implement it — `claude.Client`,
+`claude.VertexClient`, `gemini.Client` and `openai.Client`. Obtain the name with
+a type assertion on the `gollem.LLMClient` you already hold:
+
+```go
+client, err := openai.New(ctx, apiKey, openai.WithModel("gpt-5-mini"))
+if err != nil {
+    return err
+}
+
+var llm gollem.LLMClient = client
+
+model := "unknown"
+if namer, ok := llm.(gollem.ModelNamer); ok {
+    model = namer.Model() // "gpt-5-mini"
+}
+```
+
+The interface is optional: `LLMClient` itself is unchanged, so a custom client
+or a mock that does not implement `ModelNamer` keeps working, and the assertion
+simply reports `false`.
+
+`Model()` returns the name the client was **configured** with — the value passed
+to `WithModel` (or `WithVertexModel`), or the provider default when no option
+was given. It is not the model id an API response may report: an alias can
+resolve to a dated snapshot, and returning that would break a caller keying a
+price table by the name it configured. The value is fixed at construction time,
+so calling `Model()` performs no API request and is safe to call concurrently.
+
 ### Error Handling
 
 All providers return standardized errors that can be checked:

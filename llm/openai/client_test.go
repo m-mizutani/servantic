@@ -631,3 +631,44 @@ func TestConvertResponseSchemaToOpenAIIsByteStable(t *testing.T) {
 	t.Run("strict mode requires every property", runTest(true, `"required":["alpha","bravo","mike","zulu"]`))
 	t.Run("non-strict mode requires the marked properties", runTest(false, `"required":["alpha","zulu"]`))
 }
+
+var _ gollem.ModelNamer = (*openai.Client)(nil)
+
+// TestClientModel verifies that the client reports the model name it was
+// configured with, without consulting the API.
+func TestClientModel(t *testing.T) {
+	type testCase struct {
+		options  []openai.Option
+		expected string
+	}
+
+	runTest := func(tc testCase) func(t *testing.T) {
+		return func(t *testing.T) {
+			client, err := openai.New(context.Background(), "test-key", tc.options...)
+			gt.NoError(t, err).Required()
+			gt.Equal(t, tc.expected, client.Model())
+		}
+	}
+
+	t.Run("configured model", runTest(testCase{
+		options:  []openai.Option{openai.WithModel("gpt-5-mini")},
+		expected: "gpt-5-mini",
+	}))
+
+	t.Run("default model when no option is given", runTest(testCase{
+		expected: openai.DefaultModel,
+	}))
+
+	t.Run("last option wins", runTest(testCase{
+		options: []openai.Option{
+			openai.WithModel("gpt-5-mini"),
+			openai.WithModel("gpt-5-nano"),
+		},
+		expected: "gpt-5-nano",
+	}))
+
+	t.Run("empty model is reported as configured", runTest(testCase{
+		options:  []openai.Option{openai.WithModel("")},
+		expected: "",
+	}))
+}
